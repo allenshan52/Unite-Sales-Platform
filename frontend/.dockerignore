@@ -1,0 +1,6 @@
+# Next.js Docker 构建忽略项：容器自行安装依赖，避免携带本机缓存与本地密钥。
+node_modules
+.next
+.env.local
+ui-check
+debug.log

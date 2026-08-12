@@ -1,0 +1,28 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node.js / Next.js
+node_modules/
+.next/
+out/
+
+# Environment and local data
+.env
+.env.*
+!.env.example
+*.sqlite3
+exports/
+ui-check/
+*.log
+
+# Editors and operating systems
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+.DS_Store
