@@ -1,6 +1,12 @@
-# Next.js Docker 构建忽略项：容器自行安装依赖，避免携带本机缓存与本地密钥。
+# Next.js Docker 构建忽略项：常规构建不携带缓存，离线运行镜像只放行已验证的 standalone 产物。
 node_modules
-.next
+.next/*
+!.next/standalone/
+!.next/standalone/**
+!.next/static/
+!.next/static/**
+.next/standalone/**/*.node
+.next/standalone/node_modules/@img/sharp-win32-*
 .env.local
 ui-check
 debug.log

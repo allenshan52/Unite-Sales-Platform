@@ -1,21 +1,33 @@
 """API 合同测试：覆盖公开目录、管理员保护及单位证据输入约束。"""
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
+from app.database import get_db
+from app.main import app
+from app.models import OrganizationContact, UserRole
+from app.sales_coverage import SalesCoverageLevel
+from app.routers import auth as auth_router
+from app.routers import health as health_router
+from app.routers.organizations import filter_options
+from app.schemas import ContactUpdate, OrganizationAdminCreate, OrganizationCreate
+from app.services.auth import (
+    CSRF_COOKIE_NAME,
+    SESSION_COOKIE_NAME,
+    get_current_admin,
+    get_current_user,
+)
+from app.services.organizations import (
+    _ensure_organization_is_not_duplicate,
+    _sync_related_records,
+    create_organization,
+)
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
-
-from app.database import get_db
-from app.main import app
-from app.routers.organizations import filter_options
-from app.models import OrganizationContact
-from app.schemas import ContactUpdate, OrganizationAdminCreate, OrganizationCreate
-from app.services.auth import get_current_admin
-from app.services.organizations import _ensure_organization_is_not_duplicate, _sync_related_records, create_organization
 
 
 def valid_university_payload() -> dict[str, object]:
@@ -50,6 +62,8 @@ def organization_response_payload() -> dict[str, object]:
         "cooperation_intent": "计划开展检测合作",
         "cooperation_level": "二级",
         "notes": None,
+        "archived_at": None,
+        "version": 1,
         "sites": [{
             "id": str(UUID(int=2)),
             "site_name": "主校区",
@@ -75,8 +89,10 @@ def organization_response_payload() -> dict[str, object]:
             "ai_summary": None, "next_action": "发送演示方案", "next_action_at": "2026-08-18",
         }],
         "sales_projects": [{
-            "id": str(UUID(int=5)), "opportunity_id": str(UUID(int=4)), "name": "演示成交项目",
-            "contract_amount": "88000.00", "signed_at": "2026-08-08", "project_detail": "演示项目详情",
+            "id": str(UUID(int=5)), "opportunity_id": str(UUID(int=4)), "salesperson_id": str(UUID(int=6)), "name": "演示成交项目",
+            "contract_amount": "88000.00", "unit_price": "44000.00", "quantity": "2.000", "supplier_name": "演示供应商",
+            "specification_model": "DEMO-2026", "province": "河南省", "city": "郑州市",
+            "signed_at": "2026-08-08", "project_detail": "演示项目详情",
         }],
         "created_at": timestamp,
         "updated_at": timestamp,
@@ -128,13 +144,173 @@ def test_health_check_succeeds_without_authentication() -> None:
     assert response.json() == {"status": "ok"}
 
 
+def test_production_readiness_checks_database_and_redis(monkeypatch: pytest.MonkeyPatch) -> None:
+    """就绪探针同时确认数据库和 Redis，供 Compose 只转发到可服务的 API。"""
+
+    class ReadyDb:
+        """记录数据库探针确实执行了轻量查询。"""
+
+        executed = False
+
+        def execute(self, _statement: object) -> None:
+            """标记健康查询已执行。"""
+
+            self.executed = True
+
+    ready_db = ReadyDb()
+    monkeypatch.setattr(health_router, "_redis_is_ready", lambda: True)
+    app.dependency_overrides[get_db] = lambda: ready_db
+    try:
+        with TestClient(app) as client:
+            response = client.get("/api/v1/health/ready")
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == 200
+    assert response.json()["status"] == "ready"
+    assert ready_db.executed is True
+
+
+def test_login_cookie_can_be_hardened_for_https(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HTTPS 部署开关必须给登录 Cookie 增加 Secure，同时保留 HttpOnly 与 SameSite。"""
+
+    monkeypatch.setattr(auth_router.settings, "admin_cookie_secure", True)
+    monkeypatch.setattr(auth_router, "login_user", lambda _db, _username, _password: ("demo-session-token", "demo-csrf-token", SimpleNamespace(username="admin", role=UserRole.admin, coverage_scopes=[])))
+    app.dependency_overrides[get_db] = lambda: object()
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/auth/login",
+                json={"username": "admin", "password": "demo-password-for-test"},
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    cookie_header = response.headers["set-cookie"].lower()
+    assert "secure" in cookie_header
+    assert "httponly" in cookie_header
+    assert "samesite=lax" in cookie_header
+    assert f"{CSRF_COOKIE_NAME}=demo-csrf-token" in cookie_header
+
+
+def test_login_rejects_untrusted_browser_origin() -> None:
+    """跨站网页不能触发管理员登录并把受害者浏览器绑定到攻击者会话。"""
+
+    app.dependency_overrides[get_db] = lambda: object()
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/auth/login",
+                headers={"Origin": "https://attacker.example"},
+                json={"username": "admin", "password": "demo-password-for-test"},
+            )
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == 403
+    assert response.json()["detail"] == "不允许从当前来源登录"
+
+
+def test_login_accepts_same_host_origin_without_static_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
+    """反向代理更换受信域名后，同主机浏览器登录仍可用且无需放宽跨站来源。"""
+
+    monkeypatch.setattr(auth_router, "login_user", lambda _db, _username, _password: ("demo-session-token", "demo-csrf-token", SimpleNamespace(username="admin", role=UserRole.admin, coverage_scopes=[])))
+    app.dependency_overrides[get_db] = lambda: object()
+    try:
+        with TestClient(app, base_url="https://temporary.example") as client:
+            response = client.post(
+                "/api/v1/auth/login",
+                headers={"Origin": "https://temporary.example"},
+                json={"username": "admin", "password": "demo-password-for-test"},
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+
+
+def test_logout_returns_204_and_clears_session_cookie(monkeypatch: pytest.MonkeyPatch) -> None:
+    """退出接口必须返回合法 204、撤销当前 token 并发送浏览器 Cookie 清除指令。"""
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr("app.routers.auth.logout_user", lambda db, token: captured.update(db=db, token=token))
+    app.dependency_overrides[get_db] = lambda: object()
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(username="admin_test", role=UserRole.admin)
+    try:
+        with TestClient(app) as client:
+            client.cookies.set(SESSION_COOKIE_NAME, "demo-session-token")
+            response = client.post("/api/v1/auth/logout")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 204
+    assert response.content == b""
+    assert captured["token"] == "demo-session-token"
+    cookie_header = response.headers["set-cookie"].lower()
+    assert SESSION_COOKIE_NAME in cookie_header
+    assert "max-age=0" in cookie_header
+
+
 def test_organization_list_requires_admin_session() -> None:
     """单位名单在未认证访问时必须被拦截，避免真实数据意外暴露。"""
 
     with TestClient(app) as client:
         response = client.get("/api/v1/organizations")
     assert response.status_code == 401
-    assert response.json()["detail"] == "请先登录管理后台"
+    assert response.json()["detail"] == "请先登录"
+
+
+def test_organization_batch_requires_admin_session() -> None:
+    """批量动作禁止匿名调用，避免单次请求扩大未授权修改影响。"""
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/organizations/batch",
+            json={"ids": [str(UUID(int=1))], "action": "archive"},
+        )
+    assert response.status_code == 401
+
+
+def test_organization_batch_validates_required_owner() -> None:
+    """分配负责人缺少姓名时在事务前返回 422。"""
+
+    app.dependency_overrides[get_current_admin] = lambda: SimpleNamespace(username="admin_test")
+    app.dependency_overrides[get_db] = lambda: object()
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/organizations/batch",
+                json={"ids": [str(UUID(int=1))], "action": "assign_owner"},
+            )
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == 422
+
+
+def test_admin_can_run_atomic_organization_batch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """管理员可提交批量归档，并获得实际更新条数。"""
+
+    captured: dict[str, object] = {}
+
+    def fake_batch(_db: object, payload: object, username: str) -> int:
+        """记录路由传入的动作和操作者，隔离真实事务。"""
+
+        captured.update(action=payload.action, username=username, count=len(payload.ids))
+        return 2
+
+    monkeypatch.setattr("app.routers.organizations.batch_update_organizations", fake_batch)
+    app.dependency_overrides[get_current_admin] = lambda: SimpleNamespace(username="admin_test")
+    app.dependency_overrides[get_db] = lambda: object()
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/organizations/batch",
+                json={"ids": [str(UUID(int=1)), str(UUID(int=2))], "action": "archive"},
+            )
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == 200
+    assert response.json() == {"updated": 2}
+    assert captured == {"action": "archive", "username": "admin_test", "count": 2}
 
 
 def test_organization_create_requires_admin_session() -> None:
@@ -167,6 +343,30 @@ def test_organization_create_requires_province_and_city() -> None:
     assert "新增单位必须填写省份和城市" in response.text
 
 
+def test_regular_user_cannot_create_organization_outside_coverage() -> None:
+    """普通用户即使伪造后台请求，也不能在负责省份之外新增单位。"""
+
+    employee = SimpleNamespace(
+        username="jilin_sales",
+        role=UserRole.employee,
+        coverage_scopes=[SimpleNamespace(scope_level=SalesCoverageLevel.province, scope_name="吉林", province="吉林", city=None)],
+    )
+    app.dependency_overrides[get_current_admin] = lambda: employee
+    app.dependency_overrides[get_db] = lambda: object()
+    try:
+        with TestClient(app) as client:
+            response = client.post("/api/v1/organizations", json={
+                "name": "辽宁演示单位",
+                "organization_type": "企业",
+                "primary_site": {"province": "辽宁省", "city": "沈阳市"},
+            })
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "当前账号不能修改该区域的数据"
+
+
 def test_admin_can_create_organization_with_business_records(monkeypatch: pytest.MonkeyPatch) -> None:
     """新增接口把主地点、联系人、成交项目、商机与证据一次交给服务层。"""
 
@@ -177,6 +377,13 @@ def test_admin_can_create_organization_with_business_records(monkeypatch: pytest
         assert payload.primary_site.city == "郑州市"
         assert payload.contacts[0].name == "演示联系人"
         assert payload.sales_projects[0].contract_amount == 88000
+        assert payload.sales_projects[0].unit_price == 44000
+        assert payload.sales_projects[0].quantity == 2
+        assert payload.sales_projects[0].supplier_name == "演示供应商"
+        assert payload.sales_projects[0].specification_model == "DEMO-2026"
+        assert payload.sales_projects[0].province == "河南省"
+        assert payload.sales_projects[0].city == "郑州市"
+        assert payload.sales_projects[0].products[0].brand == "虚构产品品牌"
         assert payload.opportunities[0].stage.value == "方案/报价"
         assert payload.evidences[0].evidence_kind.value == "官方名录"
         return response_payload
@@ -192,7 +399,11 @@ def test_admin_can_create_organization_with_business_records(monkeypatch: pytest
                 "organization_type": "高校",
                 "primary_site": {"province": "河南省", "city": "郑州市", "district": "金水区"},
                 "contacts": [{"name": "演示联系人", "is_primary": True}],
-                "sales_projects": [{"name": "演示成交项目", "contract_amount": 88000}],
+                "sales_projects": [{
+                    "name": "演示成交项目", "contract_amount": 88000, "unit_price": 44000, "quantity": 2,
+                    "supplier_name": "演示供应商", "specification_model": "DEMO-2026", "province": "河南省", "city": "郑州市",
+                    "products": [{"product_name": "演示检测设备", "brand": "虚构产品品牌", "specification_model": "DEMO-2026", "unit_price": 44000, "quantity": 2, "line_total": 88000}],
+                }],
                 "opportunities": [{"title": "演示检测商机", "stage": "方案/报价"}],
                 "evidences": [{"evidence_kind": "官方名录", "title": "演示官方名录", "source_url": "https://example.test/list"}],
             })
@@ -259,7 +470,7 @@ def test_filter_options_requires_admin_session() -> None:
     with TestClient(app) as client:
         response = client.get("/api/v1/organizations/filters")
     assert response.status_code == 401
-    assert response.json()["detail"] == "请先登录管理后台"
+    assert response.json()["detail"] == "请先登录"
 
 
 def test_organization_delete_requires_admin_session() -> None:
@@ -299,6 +510,9 @@ def test_admin_can_update_primary_site(monkeypatch: pytest.MonkeyPatch) -> None:
         assert payload.primary_site.province == "河南省"
         assert payload.contacts[0].name == "演示联系人"
         assert payload.sales_projects[0].contract_amount == 88000
+        assert payload.sales_projects[0].unit_price == 44000
+        assert payload.sales_projects[0].salesperson_id == UUID(int=6)
+        assert payload.sales_projects[0].products[0].brand == "虚构产品品牌"
         assert payload.opportunities[0].stage.value == "方案/报价"
         return response_payload
 
@@ -311,10 +525,16 @@ def test_admin_can_update_primary_site(monkeypatch: pytest.MonkeyPatch) -> None:
             response = client.patch(
                 f"/api/v1/organizations/{UUID(int=1)}",
                 json={
+                    "version": 1,
                     "name": "示例检测学院（演示）",
                     "recent_follow_up_content": "演示跟进内容",
                     "contacts": [{"name": "演示联系人", "is_primary": True}],
-                    "sales_projects": [{"name": "演示成交项目", "contract_amount": 88000}],
+                    "sales_projects": [{
+                        "name": "演示成交项目", "contract_amount": 88000, "unit_price": 44000, "quantity": 2,
+                        "supplier_name": "演示供应商", "specification_model": "DEMO-2026", "province": "河南省", "city": "郑州市",
+                        "salesperson_id": str(UUID(int=6)),
+                        "products": [{"product_name": "演示检测设备", "brand": "虚构产品品牌", "specification_model": "DEMO-2026", "unit_price": 44000, "quantity": 2, "line_total": 88000}],
+                    }],
                     "opportunities": [{"title": "演示检测商机", "stage": "方案/报价"}],
                     "primary_site": {"province": "河南省", "geocode_status": "已定位", "longitude": 113.6, "latitude": 34.8},
                 },
@@ -325,8 +545,16 @@ def test_admin_can_update_primary_site(monkeypatch: pytest.MonkeyPatch) -> None:
     assert response.json()["sites"][0]["province"] == "河南省"
 
 
-def test_organization_update_rejects_negative_contract_amount() -> None:
-    """成交金额必须保持非负，非法金额在进入事务前返回 422。"""
+@pytest.mark.parametrize(
+    "project",
+    [
+        {"name": "演示成交项目", "contract_amount": -1},
+        {"name": "演示成交项目", "contract_amount": 1, "unit_price": 0},
+        {"name": "演示成交项目", "contract_amount": 1, "quantity": 0},
+    ],
+)
+def test_organization_update_rejects_invalid_sales_project_amounts(project: dict[str, object]) -> None:
+    """成交总额不得为负，填写后的单价与数量必须为正。"""
 
     app.dependency_overrides[get_current_admin] = lambda: SimpleNamespace(username="admin_test")
     app.dependency_overrides[get_db] = lambda: object()
@@ -334,7 +562,7 @@ def test_organization_update_rejects_negative_contract_amount() -> None:
         with TestClient(app) as client:
             response = client.patch(
                 f"/api/v1/organizations/{UUID(int=1)}",
-                json={"sales_projects": [{"name": "演示成交项目", "contract_amount": -1}]},
+                json={"version": 1, "sales_projects": [project]},
             )
     finally:
         app.dependency_overrides.clear()
@@ -406,25 +634,25 @@ def test_organization_update_rejects_invalid_longitude() -> None:
     app.dependency_overrides[get_db] = lambda: object()
     try:
         with TestClient(app) as client:
-            response = client.patch(f"/api/v1/organizations/{UUID(int=1)}", json={"primary_site": {"longitude": 150, "latitude": 34.8}})
+            response = client.patch(f"/api/v1/organizations/{UUID(int=1)}", json={"version": 1, "primary_site": {"longitude": 150, "latitude": 34.8}})
     finally:
         app.dependency_overrides.clear()
     assert response.status_code == 422
 
 
-def test_public_filter_options_allow_anonymous_access() -> None:
+def test_public_filter_options_allow_authorized_access(viewer_session: None) -> None:
     """公开主站无需管理员 Cookie 也能读取完整地点层级筛选项。"""
 
     class ScalarRows:
-        def __init__(self, values: list[str]) -> None:
+        def __init__(self, values: list[object]) -> None:
             self.values = values
 
-        def all(self) -> list[str]:
+        def all(self) -> list[object]:
             return self.values
 
     class FilterOptionsDb:
         def __init__(self) -> None:
-            self.responses = iter([["河南省"], ["安阳市"], ["文峰区"]])
+            self.responses = iter([["河南省"], ["安阳市"], ["文峰区"], []])
 
         def scalars(self, _statement: object) -> ScalarRows:
             return ScalarRows(next(self.responses))
@@ -438,36 +666,140 @@ def test_public_filter_options_allow_anonymous_access() -> None:
     assert response.status_code == 200
     assert response.json()["cities"] == ["安阳市"]
     assert response.json()["districts"] == ["文峰区"]
+    assert response.json()["salespeople"] == []
 
 
-def test_public_province_summaries_allow_anonymous_access(monkeypatch: pytest.MonkeyPatch) -> None:
-    """公开热力聚合无需管理员 Cookie，并且只返回省级统计字段。"""
+def test_public_map_points_include_safe_popup_summary(monkeypatch: pytest.MonkeyPatch, viewer_session: None) -> None:
+    """公开点位一次返回地址与商机汇总，不暴露联系人、跟进动作或内部备注。"""
 
     monkeypatch.setattr(
-        "app.routers.organizations.summarize_organizations_by_province",
-        lambda _db: [{
-            "province": "河南省",
-            "total": 39,
-            "organization_types": {"高校": 35, "研究院": 4},
-            "customer_statuses": {"潜在客户": 30, "商机客户": 7, "已成交客户": 2},
+        "app.routers.organizations.list_organization_map_points",
+        lambda *_args, **_kwargs: [{
+            "id": UUID(int=801),
+            "name": "华东检测研究院（演示）",
+            "organization_type": "研究院",
+            "customer_status": "商机客户",
+            "review_status": "已核验",
+            "longitude": 120.1551,
+            "latitude": 30.2741,
+            "province": "浙江省",
+            "city": "杭州市",
+            "district": "西湖区",
+            "address": "杭州市西湖区演示地址",
+            "active_opportunity_count": 2,
+            "opportunity_stage": "商务谈判",
+            "estimated_opportunity_amount": Decimal("350000.00"),
         }],
     )
     app.dependency_overrides[get_db] = lambda: object()
     try:
         with TestClient(app) as client:
-            response = client.get("/api/v1/public/organizations/province-summaries")
+            response = client.get("/api/v1/public/organizations/map-points")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    item = response.json()[0]
+    assert item["address"] == "杭州市西湖区演示地址"
+    assert item["active_opportunity_count"] == 2
+    assert item["opportunity_stage"] == "商务谈判"
+    assert item["estimated_opportunity_amount"] == "350000.00"
+    assert "contacts" not in item and "next_action" not in item and "notes" not in item
+
+
+def test_public_map_points_pass_current_account_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+    """吉林辽宁账号的全国单位点位查询必须把两省范围传入服务层。"""
+
+    captured: dict[str, object] = {}
+
+    def fake_map_points(_db, **values):
+        captured["scope"] = values["data_scope"]
+        return []
+
+    user = SimpleNamespace(
+        role=UserRole.employee,
+        coverage_scopes=[
+            SimpleNamespace(scope_level=SalesCoverageLevel.province, scope_name="吉林", province="吉林", city=None),
+            SimpleNamespace(scope_level=SalesCoverageLevel.province, scope_name="辽宁", province="辽宁", city=None),
+        ],
+    )
+    monkeypatch.setattr("app.routers.organizations.list_organization_map_points", fake_map_points)
+    app.dependency_overrides[get_current_user] = lambda: user
+    app.dependency_overrides[get_db] = lambda: object()
+    try:
+        with TestClient(app) as client:
+            response = client.get("/api/v1/public/organizations/map-points")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert captured["scope"].visible_provinces == frozenset({"吉林", "辽宁"})
+
+
+def test_public_map_points_reject_oversized_city(viewer_session: None) -> None:
+    """点位筛选在查询前拒绝异常长城市名。"""
+
+    app.dependency_overrides[get_db] = lambda: object()
+    try:
+        with TestClient(app) as client:
+            response = client.get("/api/v1/public/organizations/map-points", params={"city": "市" * 61})
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == 422
+
+
+def test_admin_map_points_require_session() -> None:
+    """管理员点位别名仍需登录，公开展示只通过专用路由读取。"""
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/organizations/map-points")
+    assert response.status_code == 401
+
+
+def test_public_won_customers_returns_only_map_safe_actual_deal_fields(monkeypatch: pytest.MonkeyPatch, viewer_session: None) -> None:
+    """匿名成交客户接口只暴露地图详情，并把实际项目金额按 NUMERIC 口径返回。"""
+
+    monkeypatch.setattr(
+        "app.routers.organizations.list_public_won_customer_map_points",
+        lambda _db: [{
+            "id": UUID(int=901),
+            "name": "公司1",
+            "organization_type": "企业",
+            "industry": "华东实验室设备",
+            "customer_status": "已成交客户",
+            "review_status": "已核验",
+            "address": "上海市浦东新区演示地址",
+            "province": "上海市",
+            "city": "上海市",
+            "district": "浦东新区",
+            "longitude": 121.4917,
+            "latitude": 31.2174,
+            "deal_count": 2,
+            "actual_sales_amount": Decimal("920000.00"),
+            "deals": [{
+                "id": UUID(int=902),
+                "name": "公司1实验室设备一期",
+                "contract_amount": Decimal("680000.00"),
+                "signed_at": date(2025, 3, 18),
+                "project_detail": "纯虚构成交项目",
+            }],
+        }],
+    )
+    app.dependency_overrides[get_db] = lambda: object()
+    try:
+        with TestClient(app) as client:
+            response = client.get("/api/v1/public/organizations/won-customers")
     finally:
         app.dependency_overrides.clear()
     assert response.status_code == 200
-    assert response.json() == [{
-        "province": "河南省",
-        "total": 39,
-        "organization_types": {"高校": 35, "研究院": 4},
-        "customer_statuses": {"潜在客户": 30, "商机客户": 7, "已成交客户": 2},
-    }]
+    item = response.json()[0]
+    assert item["customer_status"] == "已成交客户"
+    assert item["actual_sales_amount"] == "920000.00"
+    assert item["deals"][0]["contract_amount"] == "680000.00"
+    assert "contacts" not in item and "notes" not in item and "follow_up_owner" not in item
 
 
-def test_public_sales_office_locations_allow_anonymous_access(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_public_sales_office_locations_allow_authorized_access(monkeypatch: pytest.MonkeyPatch, viewer_session: None) -> None:
     """公开主站无需管理员 Cookie 即可读取启用常驻点的可视化字段。"""
 
     monkeypatch.setattr("app.routers.sales_office_locations.list_public_sales_office_locations", lambda _db: [sales_office_response_payload()])
@@ -524,7 +856,7 @@ def test_sales_office_update_rejects_invalid_radius() -> None:
     assert response.status_code == 422
 
 
-def test_public_channel_partner_locations_are_safe_and_anonymous(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_public_channel_partner_locations_are_safe_for_authorized_users(monkeypatch: pytest.MonkeyPatch, viewer_session: None) -> None:
     """公开渠道接口无需登录，且响应不包含合同、备注和空业务坐标。"""
 
     monkeypatch.setattr("app.routers.channel_partner_locations.list_public_channel_partner_points", lambda _db: [public_channel_partner_payload()])
@@ -586,7 +918,7 @@ def test_channel_partner_update_rejects_invalid_radius() -> None:
     assert response.status_code == 422
 
 
-def test_public_organization_list_excludes_admin_only_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_public_organization_list_excludes_admin_only_fields(monkeypatch: pytest.MonkeyPatch, viewer_session: None) -> None:
     """匿名列表仅返回主站字段，详细地址、坐标、备注和证据内容不会泄露。"""
 
     organization = SimpleNamespace(
@@ -613,7 +945,7 @@ def test_public_organization_list_excludes_admin_only_fields(monkeypatch: pytest
     assert set(item["sites"][0]) == {"province", "city", "district", "is_primary"}
 
 
-def test_public_filters_reject_oversized_province() -> None:
+def test_public_filters_reject_oversized_province(viewer_session: None) -> None:
     """公开筛选入口沿用地点参数长度校验，异常输入不会进入数据库查询。"""
 
     app.dependency_overrides[get_db] = lambda: object()
@@ -629,29 +961,39 @@ def test_filter_options_returns_selected_location_hierarchy() -> None:
     """省市筛选返回数据库中的下级城市和区，供地图与单位库保持一致。"""
 
     class ScalarRows:
-        def __init__(self, values: list[str]) -> None:
+        def __init__(self, values: list[object]) -> None:
             self.values = values
 
-        def all(self) -> list[str]:
+        def all(self) -> list[object]:
             return self.values
 
     class FilterOptionsDb:
         def __init__(self) -> None:
-            self.responses = iter([["上海市"], ["上海市"], ["徐汇区", "杨浦区"]])
+            self.responses = iter([
+                ["上海市"],
+                ["上海市"],
+                ["徐汇区", "杨浦区"],
+                [SimpleNamespace(id=UUID(int=6), employee_code="XS006", display_name="演示销售", is_active=True)],
+            ])
 
         def scalars(self, _statement: object) -> ScalarRows:
             return ScalarRows(next(self.responses))
 
-    options = filter_options(province="上海市", city="上海市", db=FilterOptionsDb())
+    options = filter_options(
+        province="上海市", city="上海市", db=FilterOptionsDb(),
+        user=SimpleNamespace(role=UserRole.admin, coverage_scopes=[]),
+    )
     assert options.provinces == ["上海市"]
     assert options.cities == ["上海市"]
     assert options.districts == ["徐汇区", "杨浦区"]
+    assert options.salespeople[0].employee_code == "XS006"
 
 
 def test_filter_options_rejects_oversized_province() -> None:
     """地点筛选限制长度，避免异常长查询进入数据库条件。"""
 
     app.dependency_overrides[get_current_admin] = lambda: object()
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(role=UserRole.admin, coverage_scopes=[])
     app.dependency_overrides[get_db] = lambda: object()
     try:
         with TestClient(app) as client:

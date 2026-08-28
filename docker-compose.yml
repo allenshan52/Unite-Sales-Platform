@@ -20,6 +20,11 @@ services:
   redis:
     image: redis:7-alpine
     command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
     volumes:
       - redis_data:/data
     networks: [internal]
@@ -27,6 +32,8 @@ services:
   api:
     build:
       context: ./backend
+    # Compose 显式声明生产入口，确保本地镜像覆盖更新后仍先迁移再启动 API。
+    command: ["sh", "-c", "alembic upgrade head && fastapi run app/main.py --host 0.0.0.0 --port 8000"]
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
@@ -35,9 +42,22 @@ services:
       POSTGRES_PORT: 5432
       ADMIN_USERNAME: ${ADMIN_USERNAME}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      APP_ENVIRONMENT: ${APP_ENVIRONMENT:-development}
+      # HTTPS 演示/生产入口设为 true；本地 http://localhost 保持 false 才能登录。
+      ADMIN_COOKIE_SECURE: ${ADMIN_COOKIE_SECURE:-false}
       AMAP_REST_API_KEY: ${AMAP_REST_API_KEY}
-      CORS_ORIGINS: http://localhost:${APP_PORT}
+      # 正式域名必须在根 .env 显式覆盖，供 CORS 与登录 Origin 校验共用。
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3100}
       REDIS_URL: redis://redis:6379/0
+      # 数据库连接设置限制单实例并发连接，并主动回收失效或长期空闲的连接。
+      DATABASE_POOL_SIZE: ${DATABASE_POOL_SIZE:-5}
+      DATABASE_MAX_OVERFLOW: ${DATABASE_MAX_OVERFLOW:-10}
+      DATABASE_POOL_TIMEOUT_SECONDS: ${DATABASE_POOL_TIMEOUT_SECONDS:-30}
+      DATABASE_POOL_RECYCLE_SECONDS: ${DATABASE_POOL_RECYCLE_SECONDS:-1800}
+      DATABASE_CONNECT_TIMEOUT_SECONDS: ${DATABASE_CONNECT_TIMEOUT_SECONDS:-5}
+      DATABASE_STATEMENT_TIMEOUT_MS: ${DATABASE_STATEMENT_TIMEOUT_MS:-15000}
+      ADMIN_LOGIN_MAX_ATTEMPTS: ${ADMIN_LOGIN_MAX_ATTEMPTS:-5}
+      ADMIN_LOGIN_LOCK_SECONDS: ${ADMIN_LOGIN_LOCK_SECONDS:-900}
       # 所有官方公开名单共用低并发边界；根目录 .env 可在 1 至 8 间调整。
       OFFICIAL_IMPORT_MAX_PARALLEL_REQUESTS: ${OFFICIAL_IMPORT_MAX_PARALLEL_REQUESTS:-4}
       OFFICIAL_IMPORT_MAX_REQUEST_ATTEMPTS: ${OFFICIAL_IMPORT_MAX_REQUEST_ATTEMPTS:-5}
@@ -45,11 +65,18 @@ services:
     volumes:
       - ./backend:/app
       - /app/__pycache__
+      - ./frontend/public/cases:/case-media
     depends_on:
       db:
         condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/ready', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
     networks: [internal]
 
   web:
@@ -59,9 +86,11 @@ services:
         NEXT_PUBLIC_AMAP_JSAPI_KEY: ${AMAP_WEB_KEY}
     environment:
       NODE_ENV: production
+    volumes:
+      - ./frontend/public/cases:/app/public/cases:ro
     depends_on:
       api:
-        condition: service_started
+        condition: service_healthy
     networks: [internal]
 
   gateway:
@@ -74,7 +103,7 @@ services:
       - ./infra/nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
     depends_on:
       api:
-        condition: service_started
+        condition: service_healthy
       web:
         condition: service_started
     networks: [internal]

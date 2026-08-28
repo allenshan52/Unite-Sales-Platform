@@ -1,14 +1,49 @@
-# Nginx 网关：同源代理 Next.js、FastAPI 与高德安全服务；浏览器永不获得 jscode。
+# Nginx 网关：同源代理 Next.js、FastAPI 与高德安全服务，并在入口统一限流和补充安全头。
+limit_req_zone $binary_remote_addr zone=admin_login_per_ip:10m rate=5r/m;
+
 server {
   listen 80;
   server_name _;
   client_max_body_size 20m;
+  limit_req_status 429;
+
+  add_header X-Content-Type-Options "nosniff" always;
+  add_header X-Frame-Options "DENY" always;
+  add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+  add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+  # 高德 JSAPI 2.0 的插件与 WebGL 模块需要动态求值；其余脚本仍受同源和高德域名白名单约束。
+  add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://webapi.amap.com https://*.amap.com; style-src 'self' 'unsafe-inline' https://*.amap.com; img-src 'self' data: blob: https://*.amap.com https://*.autonavi.com; connect-src 'self' https://*.amap.com https://*.autonavi.com; font-src 'self' data:; worker-src 'self' blob:; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'" always;
+  add_header X-Request-ID $request_id always;
+
+  error_page 429 = @login_rate_limited;
+
+  # 登录入口按客户端 IP 限速；突发三次后返回统一中文 JSON，不把 Nginx 页面暴露给前端。
+  location = /api/v1/auth/login {
+    limit_req zone=admin_login_per_ip burst=3 nodelay;
+    proxy_pass http://api:8000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Request-ID $request_id;
+    proxy_connect_timeout 5s;
+    proxy_read_timeout 30s;
+    proxy_send_timeout 30s;
+  }
+
+  location @login_rate_limited {
+    default_type application/json;
+    return 429 '{"detail":"登录请求过于频繁，请稍后重试"}';
+  }
 
   location /api/ {
     proxy_pass http://api:8000;
     proxy_set_header Host $host;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Request-ID $request_id;
+    proxy_connect_timeout 5s;
+    proxy_read_timeout 60s;
+    proxy_send_timeout 60s;
   }
 
   # 高德自定义样式服务必须优先匹配，路径与官方 JSAPI 安全代理示例一致。
@@ -16,6 +51,8 @@ server {
     set $args "$args&jscode=${AMAP_SECURITY_JS_CODE}";
     proxy_pass https://webapi.amap.com/v4/map/styles;
     proxy_ssl_server_name on;
+    proxy_connect_timeout 5s;
+    proxy_read_timeout 15s;
   }
 
   # `_AMapService` 是高德固定一级前缀；安全码仅由网关在请求转发时追加。
@@ -25,6 +62,8 @@ server {
     proxy_set_header Host restapi.amap.com;
     proxy_ssl_server_name on;
     proxy_set_header X-Real-IP $remote_addr;
+    proxy_connect_timeout 5s;
+    proxy_read_timeout 15s;
   }
 
   location / {
@@ -33,6 +72,7 @@ server {
     proxy_set_header Host $host;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Request-ID $request_id;
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "upgrade";
   }

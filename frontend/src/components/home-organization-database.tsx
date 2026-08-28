@@ -101,7 +101,7 @@ export function HomeOrganizationDatabase() {
       <div className="database-list-card">
         {error ? <p className="database-error">{error}</p> : null}
         <div className="database-table" role="table" aria-label="单位数据库列表">
-          <div className="database-row database-row-head" role="row"><span>单位</span><span>类型 / 行业</span><span>省市区</span><span>客户进展</span><span>最近跟进</span><span>商业关系</span><span>公开联系 / 证据</span></div>
+          <div className="database-row database-row-head" role="row"><span role="columnheader">单位</span><span role="columnheader">类型 / 行业</span><span role="columnheader">省市区</span><span role="columnheader">客户进展</span><span role="columnheader">最近跟进</span><span role="columnheader">商业关系</span><span role="columnheader">公开联系 / 证据</span></div>
           <div className="database-table-body">
             {loading ? <div className="database-empty">正在加载单位数据…</div> : null}
             {!loading && page?.items.map((organization: PublicOrganization) => {
@@ -109,13 +109,18 @@ export function HomeOrganizationDatabase() {
               const location = [primarySite?.province, primarySite?.city, primarySite?.district].filter(Boolean).join(" · ");
 
               return <div className="database-row" role="row" key={organization.id}>
-                <span><strong>{organization.name}</strong>{organization.is_sports_exception ? <small>体育例外</small> : null}</span>
-                <span>{organization.organization_type}<em>{organization.industry || "未标注行业"}</em></span>
-                <span>{location || "未补齐"}</span>
-                <span><b className={`database-status status-${organization.customer_status}`}>{organization.customer_status}</b><em>{organization.inclusion_reason || "等待补充推进说明"}</em></span>
-                <span className={organization.recent_follow_up_at || organization.recent_follow_up_content ? "" : "database-followup-empty"}><time dateTime={organization.recent_follow_up_at ?? undefined}>{formatFollowUpDate(organization.recent_follow_up_at)}</time><em>{organization.recent_follow_up_content || "暂无跟进内容"}</em></span>
-                <span>{organization.cooperation_intent || organization.parent_group || "暂无合作意向"}<em>{organization.cooperation_level ? `${organization.cooperation_level}合作` : "未设置合作等级"}</em></span>
-                <span>{organization.website ? <a href={organization.website} target="_blank" rel="noreferrer">官网与公开联系渠道</a> : "暂无公开联系渠道"}<em>{organization.evidence_count} 项公开证据</em></span>
+                <span role="cell">
+                  <strong>{organization.name}</strong>
+                  {organization.is_sports_exception ? <small>体育例外</small> : null}
+                  {organization.competitor_contracts.length > 0 ? <small className="competitor-linked-badge">同行已签约</small> : null}
+                  {organization.competitor_contracts.length > 0 ? <em className="competitor-linked-detail" title={organization.competitor_contracts.map((link) => `${link.competitor_name} · ${link.customer_level} · ${Number(link.total_amount).toLocaleString("zh-CN")} 元 · 置信度 ${link.confidence}`).join("；")}>{organization.competitor_contracts.map((link) => `${link.competitor_name} · ${link.customer_level} · ${Number(link.total_amount).toLocaleString("zh-CN")} 元`).join("；")}</em> : null}
+                </span>
+                <span role="cell">{organization.organization_type}<em>{organization.industry || "未标注行业"}</em></span>
+                <span role="cell">{location || "未补齐"}</span>
+                <span role="cell"><b className={`database-status status-${organization.customer_status}`}>{organization.customer_status}</b><em>{organization.inclusion_reason || "等待补充推进说明"}</em></span>
+                <span role="cell" className={organization.recent_follow_up_at || organization.recent_follow_up_content ? "" : "database-followup-empty"}><time dateTime={organization.recent_follow_up_at ?? undefined}>{formatFollowUpDate(organization.recent_follow_up_at)}</time><em>{organization.recent_follow_up_content || "暂无跟进内容"}</em></span>
+                <span role="cell">{organization.cooperation_intent || organization.parent_group || "暂无合作意向"}<em>{organization.cooperation_level ? `${organization.cooperation_level}合作` : "未设置合作等级"}</em></span>
+                <span role="cell">{organization.website ? <a href={organization.website} target="_blank" rel="noreferrer">官网与公开联系渠道</a> : "暂无公开联系渠道"}<em>{organization.evidence_count} 项公开证据</em></span>
               </div>;
             })}
             {!loading && page?.items.length === 0 ? <div className="database-empty">暂无匹配单位，请调整筛选条件。</div> : null}
