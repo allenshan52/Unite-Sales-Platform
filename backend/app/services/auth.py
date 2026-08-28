@@ -1,8 +1,8 @@
 """站点认证服务：使用密码哈希、角色和服务端会话保护主站与管理员后台。"""
 
 from datetime import UTC, datetime, timedelta
-from hmac import compare_digest
 from hashlib import sha256
+from hmac import compare_digest
 from secrets import token_urlsafe
 
 from fastapi import Cookie, Depends, Header, HTTPException, Request, status
@@ -18,6 +18,10 @@ from app.sales_coverage import SalesCoverageLevel
 from app.services.account_access import account_data_scope
 
 password_hasher = PasswordHash.recommended()
+_DUMMY_PASSWORD_HASH = (
+    "$argon2id$v=19$m=65536,t=3,p=4$zJMxR5ALD56KCx/KsnDAlQ$"
+    "Ao1krSQqtFJ86aUYDmtJvMIQW7Ap5EftzpGpnyXzO7o"
+)
 SESSION_COOKIE_NAME = "unite_admin_session"
 CSRF_COOKIE_NAME = "unite_csrf_token"
 SESSION_DURATION = timedelta(hours=12)
@@ -82,7 +86,10 @@ def login_user(db: Session, username: str, password: str) -> tuple[str, str, Adm
     user = db.scalar(select(AdminUser).where(AdminUser.username == username).with_for_update())
     if user and user.locked_until and user.locked_until > now:
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="登录尝试过多，请稍后重试")
-    if not user or not user.is_active or not password_hasher.verify(password, user.password_hash):
+    # 不存在或停用账号也执行同成本 Argon2 校验，缩小用户名枚举的响应时间差。
+    password_hash = user.password_hash if user and user.is_active else _DUMMY_PASSWORD_HASH
+    password_matches = password_hasher.verify(password, password_hash)
+    if not user or not user.is_active or not password_matches:
         if user:
             user.failed_login_attempts += 1
             if user.failed_login_attempts >= settings.admin_login_max_attempts:

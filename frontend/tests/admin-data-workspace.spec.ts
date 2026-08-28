@@ -246,6 +246,28 @@ async function openAdmin(page: Page): Promise<void> {
   await expect(page.getByRole("heading", { name: "数据后台" })).toBeVisible();
 }
 
+/** 验证任意账号的可见页签都在标题与返回入口之间居中，并与两侧控件保持同一行且不交叠。 */
+async function expectHeaderNavigationBetweenControls(page: Page): Promise<void> {
+  const metrics = await page.locator(".admin-data-header").evaluate((header) => {
+    const heading = header.querySelector<HTMLElement>(".admin-data-heading")?.getBoundingClientRect();
+    const navigation = header.querySelector<HTMLElement>(".admin-dataset-tabs")?.getBoundingClientRect();
+    const homeLink = header.querySelector<HTMLElement>(".admin-home-link")?.getBoundingClientRect();
+    if (!heading || !navigation || !homeLink) return null;
+    const centers = [heading, navigation, homeLink].map((item) => item.top + item.height / 2);
+    return {
+      navigationInsideGap: navigation.left >= heading.right && navigation.right <= homeLink.left,
+      navigationCenterOffset: Math.abs(navigation.left + navigation.width / 2 - (heading.right + homeLink.left) / 2),
+      rowCenterSpread: Math.max(...centers) - Math.min(...centers),
+      documentFits: document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+    };
+  });
+  if (!metrics) throw new Error("数据后台头部元素缺失");
+  expect(metrics.navigationInsideGap).toBe(true);
+  expect(metrics.navigationCenterOffset).toBeLessThanOrEqual(1);
+  expect(metrics.rowCenterSpread).toBeLessThanOrEqual(1);
+  expect(metrics.documentFits).toBe(true);
+}
+
 test("普通用户可进入数据后台但看不到授权账号页面", async ({ page }) => {
   await installAdminApi(page, {
     username: "jl_ln_sales",
@@ -266,6 +288,7 @@ test("普通用户可进入数据后台但看不到授权账号页面", async ({
   await expect(page.getByRole("tab", { name: "授权账号", exact: true })).toHaveCount(0);
   await expect(page.getByRole("tab", { name: "销售", exact: true })).toHaveCount(0);
   await expect(page.getByText("jl_ln_sales", { exact: true })).toBeVisible();
+  await expectHeaderNavigationBetweenControls(page);
 });
 
 test("全国普通用户可管理销售但看不到授权账号页面", async ({ page }) => {
@@ -282,6 +305,7 @@ test("全国普通用户可管理销售但看不到授权账号页面", async ({
 
   await expect(page.getByRole("tab", { name: "销售", exact: true })).toBeVisible();
   await expect(page.getByRole("tab", { name: "授权账号", exact: true })).toHaveCount(0);
+  await expectHeaderNavigationBetweenControls(page);
 });
 
 test("返回主页面保留当前登录会话", async ({ page }) => {
@@ -310,25 +334,10 @@ test("用户名位于退出按钮下方且不与后台标签重叠", async ({ pa
   expect(overlapsTabs).toBe(false);
 
   await page.setViewportSize({ width: 2048, height: 900 });
-  const desktopHeader = await page.locator(".admin-data-header").evaluate((header) => {
-    const heading = header.querySelector<HTMLElement>(".admin-data-heading")?.getBoundingClientRect();
-    const navigation = header.querySelector<HTMLElement>(".admin-dataset-tabs")?.getBoundingClientRect();
-    const actions = header.querySelector<HTMLElement>(".admin-user")?.getBoundingClientRect();
-    const overlaps = (left?: DOMRect, right?: DOMRect) => Boolean(left && right && left.left < right.right && left.right > right.left && left.top < right.bottom && left.bottom > right.top);
-    return {
-      headingNavigationOverlap: overlaps(heading, navigation),
-      navigationActionsOverlap: overlaps(navigation, actions),
-      documentFits: document.documentElement.scrollWidth <= document.documentElement.clientWidth,
-    };
-  });
-  expect(desktopHeader).toEqual({ headingNavigationOverlap: false, navigationActionsOverlap: false, documentFits: true });
+  await expectHeaderNavigationBetweenControls(page);
 
   await page.setViewportSize({ width: 1440, height: 900 });
-  const compactHeaderRows = await page.locator(".admin-data-header").evaluate((header) => {
-    const top = (selector: string) => Math.round(header.querySelector<HTMLElement>(selector)?.getBoundingClientRect().top ?? -1);
-    return [top(".admin-data-heading"), top(".admin-dataset-tabs"), top(".admin-user")];
-  });
-  expect(Math.max(...compactHeaderRows) - Math.min(...compactHeaderRows)).toBeLessThanOrEqual(16);
+  await expectHeaderNavigationBetweenControls(page);
 });
 
 test("退出登录后返回网站主页面", async ({ page }) => {
@@ -437,15 +446,13 @@ test("八个数据页统一显示分类、数量和分页布局", async ({ page 
   await expect(tabs.first()).toHaveAttribute("aria-selected", "true");
   const tabFrame = await page.locator(".admin-dataset-tabs").evaluate((element) => {
     const frame = element.getBoundingClientRect();
-    const header = element.closest(".admin-data-header")?.getBoundingClientRect();
     return {
       frameWidth: frame.width,
       buttonWidth: Array.from(element.querySelectorAll("button")).reduce((total, button) => total + button.getBoundingClientRect().width, 0),
-      centerOffset: header ? Math.abs(frame.left + frame.width / 2 - (header.left + header.width / 2)) : Number.POSITIVE_INFINITY,
     };
   });
   expect(tabFrame.frameWidth - tabFrame.buttonWidth).toBeLessThanOrEqual(12);
-  expect(tabFrame.centerOffset).toBeLessThanOrEqual(1);
+  await expectHeaderNavigationBetweenControls(page);
   await expect(page.getByRole("navigation", { name: "单位列表分页" })).toContainText("上一页");
 
   const expectedCategories = new Map([
@@ -480,12 +487,7 @@ test("八个数据页统一显示分类、数量和分页布局", async ({ page 
   expect(customerGroupTableFits).toBe(true);
   await page.getByRole("tab", { name: "销售", exact: true }).click();
   await expect(page.getByLabel("选择数据分类")).toHaveCount(0);
-  const salesTabCenterOffset = await page.locator(".admin-dataset-tabs").evaluate((element) => {
-    const frame = element.getBoundingClientRect();
-    const header = element.closest(".admin-data-header")?.getBoundingClientRect();
-    return header ? Math.abs(frame.left + frame.width / 2 - (header.left + header.width / 2)) : Number.POSITIVE_INFINITY;
-  });
-  expect(salesTabCenterOffset).toBeLessThanOrEqual(1);
+  await expectHeaderNavigationBetweenControls(page);
   await expect(page.getByRole("navigation", { name: "销售人员列表分页" })).toContainText(/第 1 \/ 1 页/);
   await expect(page.getByLabel("每页显示销售人员数")).toHaveValue("10");
   const salespersonHeaders = page.locator(".salesperson-admin-table").getByRole("columnheader");
@@ -868,6 +870,7 @@ test("成交订单页可直接新增优纳特订单并修改删除同行订单",
   await secondProduct.getByLabel(/产品名称/).fill("演示维护服务");
   await secondProduct.getByLabel(/^品牌$/).fill("虚构服务品牌");
   await secondProduct.getByLabel(/产品总价/).fill("5000");
+  expect(await editDialog.locator(":invalid").evaluateAll((inputs) => inputs.map((input) => ({ name: input.getAttribute("aria-label") ?? input.closest("label")?.textContent, value: (input as HTMLInputElement).value })))).toEqual([]);
   await editDialog.getByRole("button", { name: "保存修改" }).click();
   await expect(page.getByText("订单修改已保存", { exact: true })).toBeVisible();
   expect(updatePayload).not.toBeNull();

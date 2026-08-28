@@ -42,10 +42,11 @@ test("超级管理员可登录主站并看到带覆盖范围的授权账号后�
   await expect(page.getByText(adminUsername!, { exact: true })).toBeVisible();
   const superAdminRow = page.locator(".account-row").filter({ hasText: adminUsername! });
   await expect(superAdminRow.getByText("全国", { exact: true })).toBeVisible();
-  const jilinRow = page.locator(".account-row").filter({ hasText: "jilin_sales" });
-  await expect(jilinRow).toContainText("吉林");
-  await jilinRow.getByRole("button", { name: "修改" }).click();
-  const scopeDialog = page.getByRole("dialog", { name: "修改 jilin_sales" });
-  await expect(scopeDialog.getByLabel("省份")).toHaveValue("吉林");
+  const zhejiangRow = page.locator(".account-row").filter({ hasText: "sales_zhejiang" });
+  await expect(zhejiangRow).toContainText("宁波市");
+  await zhejiangRow.getByRole("button", { name: "修改" }).click();
+  const scopeDialog = page.getByRole("dialog", { name: "修改 sales_zhejiang" });
+  await expect(scopeDialog.getByLabel("省份").first()).toHaveValue("浙江");
+  await expect(scopeDialog.getByLabel("城市").first()).toHaveValue("宁波市");
   await scopeDialog.getByRole("button", { name: "取消" }).click();
 });

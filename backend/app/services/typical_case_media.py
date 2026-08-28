@@ -20,11 +20,14 @@ def _normalize_image(raw: bytes, target_dir: Path) -> TypicalCaseImageUploadRead
 
     try:
         with Image.open(BytesIO(raw)) as source:
-            source.load()
             width, height = source.size
             if width * height > MAX_IMAGE_PIXELS:
                 raise HTTPException(status_code=413, detail="图片像素过大，请上传不超过 4000 万像素的图片")
+            # 先检查图片头中的尺寸再解码，避免高压缩比位图绕过内存保护。
+            source.load()
             normalized = source.convert("RGBA" if source.mode in {"RGBA", "LA"} else "RGB")
+    except Image.DecompressionBombError as error:
+        raise HTTPException(status_code=413, detail="图片像素过大，请上传不超过 4000 万像素的图片") from error
     except (UnidentifiedImageError, OSError) as error:
         raise HTTPException(status_code=422, detail="无法识别图片内容，请上传有效的 PNG、JPEG、WebP 或 AVIF") from error
 

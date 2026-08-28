@@ -175,10 +175,10 @@ function Home({ currentUser, onLogout }: { currentUser: CurrentUser; onLogout: (
     [selectedOrganizationId, setSelectedOrganizationId] = useState<string | null>(null),
     [mapLoading, setMapLoading] = useState(true),
     [mapRequestError, setMapRequestError] = useState<string | null>(null),
-    [salesOfficeLocations, setSalesOfficeLocations] = useState<SalesOfficeLocation[]>([]),
+    [salesOfficeLocations, setSalesOfficeLocations] = useState<SalesOfficeLocation[] | null>(null),
     [salesOfficeLoading, setSalesOfficeLoading] = useState(true),
     [salesOfficeRequestError, setSalesOfficeRequestError] = useState<string | null>(null),
-    [channelPartnerLocations, setChannelPartnerLocations] = useState<ChannelPartnerMapPoint[]>([]),
+    [channelPartnerLocations, setChannelPartnerLocations] = useState<ChannelPartnerMapPoint[] | null>(null),
     [channelPartnerLoading, setChannelPartnerLoading] = useState(true),
     [channelPartnerRequestError, setChannelPartnerRequestError] = useState<string | null>(null);
   const root = useRef<HTMLElement>(null);
@@ -257,7 +257,7 @@ function Home({ currentUser, onLogout }: { currentUser: CurrentUser; onLogout: (
   }, [mapFilterOptionsQuery]);
 
   useEffect(() => {
-    if (unitMapView !== "heat" || salesOfficeLocations.length > 0) return;
+    if (unitMapView !== "heat" || salesOfficeLocations !== null) return;
     const controller = new AbortController();
 
     // 常驻点独立读取，热力统计成功时即使辅助网络失败也不影响主图。
@@ -275,10 +275,10 @@ function Home({ currentUser, onLogout }: { currentUser: CurrentUser; onLogout: (
       });
 
     return () => controller.abort();
-  }, [salesOfficeLocations.length, unitMapView]);
+  }, [salesOfficeLocations, unitMapView]);
 
   useEffect(() => {
-    if (unitMapView !== "heat" || channelPartnerLocations.length > 0) return;
+    if (unitMapView !== "heat" || channelPartnerLocations !== null) return;
     const controller = new AbortController();
 
     // 渠道覆盖点独立读取，任一辅助网络失败都不阻断省级热力主图。
@@ -296,7 +296,7 @@ function Home({ currentUser, onLogout }: { currentUser: CurrentUser; onLogout: (
       });
 
     return () => controller.abort();
-  }, [channelPartnerLocations.length, unitMapView]);
+  }, [channelPartnerLocations, unitMapView]);
 
   /** 在用户事件内重置点位请求状态，effect 仅同步外部地图数据。 */
   function updateUnitMapFilters(changes: Partial<UnitMapFilters>) {
@@ -309,8 +309,8 @@ function Home({ currentUser, onLogout }: { currentUser: CurrentUser; onLogout: (
   /** 切换地图模式时只初始化尚未成功读取的辅助点位，成交热力数据由独立组件按需加载。 */
   function selectUnitMapView(view: UnitMapView) {
     if (view === "heat") {
-      if (salesOfficeLocations.length === 0) { setSalesOfficeLoading(true); setSalesOfficeRequestError(null); }
-      if (channelPartnerLocations.length === 0) { setChannelPartnerLoading(true); setChannelPartnerRequestError(null); }
+      if (salesOfficeLocations === null) { setSalesOfficeLoading(true); setSalesOfficeRequestError(null); }
+      if (channelPartnerLocations === null) { setChannelPartnerLoading(true); setChannelPartnerRequestError(null); }
     }
     setUnitMapView(view);
   }
@@ -455,10 +455,10 @@ function Home({ currentUser, onLogout }: { currentUser: CurrentUser; onLogout: (
             <div className={`unit-map-mode ${unitMapView === "heat" ? "" : "is-hidden"}`}>
               <HomeOrganizationHeatmap
                 active={unitMapView === "heat"}
-                salesOffices={salesOfficeLocations}
+                salesOffices={salesOfficeLocations ?? []}
                 salesOfficesLoading={salesOfficeLoading}
                 salesOfficesError={salesOfficeRequestError}
-                channelPartners={channelPartnerLocations}
+                channelPartners={channelPartnerLocations ?? []}
                 channelPartnersLoading={channelPartnerLoading}
                 channelPartnersError={channelPartnerRequestError}
               />

@@ -1,7 +1,8 @@
 /** 销售覆盖地图浏览器验收：验证每人一个 Pin、标题白框、月份和双人对比闭环。 */
 
-import { expect, test, type BrowserContext } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 
+import { createAdminSession, type AuthCookies } from "./auth-session";
 import { installFakeAmap } from "./fake-amap";
 
 const pageUrl = process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3100";
@@ -11,19 +12,11 @@ const adminPassword = process.env.ADMIN_PASSWORD;
 
 test.use({ launchOptions: { executablePath: browserExecutable } });
 
-let sessionCookies: Awaited<ReturnType<BrowserContext["cookies"]>> = [];
+let sessionCookies: AuthCookies = [];
 
 test.beforeAll(async ({ browser }) => {
   test.skip(!adminUsername || !adminPassword, "需要 ADMIN_USERNAME 与 ADMIN_PASSWORD 验收真实销售地图");
-  const context = await browser.newContext();
-  const page = await context.newPage();
-  await page.goto(pageUrl, { waitUntil: "networkidle" });
-  await page.getByLabel("账号").fill(adminUsername ?? "");
-  await page.getByLabel("密码").fill(adminPassword ?? "");
-  await page.getByRole("button", { name: "进入网站" }).click();
-  await expect(page.getByRole("tab", { name: /销售覆盖与人效/ })).toBeVisible();
-  sessionCookies = await context.cookies();
-  await context.close();
+  sessionCookies = await createAdminSession(browser, pageUrl, adminUsername!, adminPassword!);
 });
 
 test.beforeEach(async ({ context }) => {
@@ -63,7 +56,7 @@ test("默认三个月显示每人一个 Pin，点击姓名后展开单人详情�
   await expect(detail).toBeVisible();
   await expect(detail.getByRole("radio", { name: "3 月" })).toHaveAttribute("aria-checked", "true");
   await expect(detail.getByText("客户拜访")).toBeVisible();
-  await expect(detail.locator(".salesperson-coverage-copy")).toContainText("（市）");
+  await expect(detail.locator(".salesperson-coverage-copy")).toContainText("全国");
   await expect(detail.getByText("成交金额", { exact: false })).toBeVisible();
   await expect(detail.getByText("储备金额", { exact: false })).toBeVisible();
   await expect.poll(() => page.evaluate(() => {

@@ -9,9 +9,9 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import (
+    AdminUser,
     CustomerStatus,
     GeocodeStatus,
-    AdminUser,
     Organization,
     OrganizationSite,
     OrganizationType,
@@ -290,9 +290,19 @@ def detail(organization_id: UUID, db: Session = Depends(get_db), user=Depends(ge
 
 @router.patch("/{organization_id}", response_model=OrganizationRead)
 def update(organization_id: UUID, payload: OrganizationUpdate, db: Session = Depends(get_db), user=Depends(get_current_admin)) -> OrganizationRead:
-    """保存账号范围内单位的人工修正，并自动记录操作日志。"""
+    """保存账号范围内单位，并拒绝把主地点移动到账号覆盖范围之外。"""
 
-    require_organization_access(db, organization_id, account_data_scope(user))
+    data_scope = account_data_scope(user)
+    require_organization_access(db, organization_id, data_scope)
+    if payload.primary_site is not None and not data_scope.unrestricted:
+        organization = get_organization(db, organization_id)
+        primary_site = next((site for site in organization.sites if site.is_primary), None)
+        site_changes = payload.primary_site.model_dump(exclude_unset=True)
+        require_location_access(
+            data_scope,
+            site_changes.get("province", primary_site.province if primary_site else None),
+            site_changes.get("city", primary_site.city if primary_site else None),
+        )
     return to_read(update_organization(db, organization_id, payload, user.username))
 
 

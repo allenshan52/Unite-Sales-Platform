@@ -63,8 +63,8 @@ function optionalText(value: string): string | null {
   return value.trim() || null;
 }
 
-/** 搜索并选择大体量外键记录，复用后台已有的受控选项接口。 */
-function DealReferenceField({ label, resource, value, required = false, onChange }: { label: string; resource: string; value: string; required?: boolean; onChange: (value: string) => void }) {
+/** 搜索并选择大体量外键记录；异步选项返回前保留编辑项的当前选择。 */
+function DealReferenceField({ label, resource, value, selectedLabel, required = false, onChange }: { label: string; resource: string; value: string; selectedLabel?: string; required?: boolean; onChange: (value: string) => void }) {
   const [search, setSearch] = useState("");
   const [options, setOptions] = useState<DealReferenceOption[]>([]);
   const [loading, setLoading] = useState(false);
@@ -81,7 +81,8 @@ function DealReferenceField({ label, resource, value, required = false, onChange
     return () => { window.clearTimeout(timer); controller.abort(); };
   }, [resource, search, value]);
 
-  return <label><span>{label}{required ? <b aria-hidden="true">*</b> : null}</span><div className="admin-reference-field"><input aria-label={`搜索${label}`} value={search} onChange={(event) => setSearch(event.target.value)} placeholder={`搜索${label}`} /><select aria-label={label} value={value} onChange={(event) => onChange(event.target.value)} required={required}><option value="">{loading ? "正在搜索…" : required ? "请选择" : "未选择"}</option>{options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></div></label>;
+  const hasSelectedOption = options.some((option) => option.value === value);
+  return <label><span>{label}{required ? <b aria-hidden="true">*</b> : null}</span><div className="admin-reference-field"><input aria-label={`搜索${label}`} value={search} onChange={(event) => setSearch(event.target.value)} placeholder={`搜索${label}`} /><select aria-label={label} value={value} onChange={(event) => onChange(event.target.value)} required={required}><option value="">{loading ? "正在搜索…" : required ? "请选择" : "未选择"}</option>{value && !hasSelectedOption ? <option value={value}>{selectedLabel || "当前已选记录"}</option> : null}{options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></div></label>;
 }
 
 /** 把当前草稿转换成对应公共数据库接口的完整订单合同。 */
@@ -129,13 +130,14 @@ export function AdminDealFormDialog({ item, defaultSeller, onCancel, onSaved }: 
 
   useEffect(() => { const dialog = dialogRef.current; dialog?.showModal(); return () => { if (dialog?.open) dialog.close(); }; }, []);
   useEffect(() => {
-    if (draft.sellerType !== "unite" || !draft.customerId) { setOpportunities([]); return; }
+    if (draft.sellerType !== "unite" || !draft.customerId) return;
     const controller = new AbortController();
     void apiFetch<Organization>(`/organizations/${draft.customerId}`, { signal: controller.signal })
       .then((organization) => setOpportunities(organization.opportunities))
       .catch((requestError: unknown) => { if (!(requestError instanceof DOMException && requestError.name === "AbortError")) setOpportunities([]); });
     return () => controller.abort();
   }, [draft.customerId, draft.sellerType]);
+  const visibleOpportunities = draft.sellerType === "unite" && draft.customerId ? opportunities : [];
 
   /** 更新单个草稿字段，避免改写传入的列表对象。 */
   function update<K extends keyof DealDraft>(field: K, value: DealDraft[K]) {
@@ -157,14 +159,14 @@ export function AdminDealFormDialog({ item, defaultSeller, onCancel, onSaved }: 
         <div className="organization-edit-body">
           <section><h3>全部订单字段</h3><div className="organization-edit-grid">
             <label><span>订单归属<b aria-hidden="true">*</b></span><select value={draft.sellerType} disabled={Boolean(item)} onChange={(event) => { update("sellerType", event.target.value as DealDraft["sellerType"]); update("customerId", ""); update("opportunityId", ""); }}><option value="unite">优纳特</option><option value="competitor">同行</option></select></label>
-            <DealReferenceField label={draft.sellerType === "unite" ? "成交单位" : "同行成交单位"} resource={draft.sellerType === "unite" ? "organizations" : "competitor_customers"} value={draft.customerId} required onChange={(value) => { update("customerId", value); update("opportunityId", ""); }} />
+            <DealReferenceField label={draft.sellerType === "unite" ? "成交单位" : "同行成交单位"} resource={draft.sellerType === "unite" ? "organizations" : "competitor_customers"} value={draft.customerId} selectedLabel={item?.customer_name} required onChange={(value) => { update("customerId", value); update("opportunityId", ""); }} />
             <label className="field-wide"><span>项目名称<b aria-hidden="true">*</b></span><input value={draft.projectName} onChange={(event) => update("projectName", event.target.value)} maxLength={255} required /></label>
             <label><span>项目总价（元）<b aria-hidden="true">*</b></span><input type="number" min={draft.sellerType === "unite" ? "0" : "0.01"} step="0.01" value={draft.totalAmount} onChange={(event) => update("totalAmount", event.target.value)} required /></label>
             <label><span>供应商名称</span><input value={draft.supplierName} onChange={(event) => update("supplierName", event.target.value)} maxLength={255} /></label>
             <label><span>签约 / 中标时间</span><input type="date" value={draft.signedAt} onChange={(event) => update("signedAt", event.target.value)} /></label>
             {draft.sellerType === "unite" ? <>
-              <DealReferenceField label="负责销售" resource="salespeople" value={draft.salespersonId} onChange={(value) => update("salespersonId", value)} />
-              <label><span>关联商机</span><select value={draft.opportunityId} onChange={(event) => update("opportunityId", event.target.value)}><option value="">未选择</option>{opportunities.map((opportunity) => <option key={opportunity.id} value={opportunity.id}>{opportunity.title}</option>)}</select></label>
+              <DealReferenceField label="负责销售" resource="salespeople" value={draft.salespersonId} selectedLabel={item?.salesperson_name ?? undefined} onChange={(value) => update("salespersonId", value)} />
+              <label><span>关联商机</span><select value={draft.opportunityId} onChange={(event) => update("opportunityId", event.target.value)}><option value="">未选择</option>{visibleOpportunities.map((opportunity) => <option key={opportunity.id} value={opportunity.id}>{opportunity.title}</option>)}</select></label>
               <label><span>省份</span><input value={draft.province} onChange={(event) => update("province", event.target.value)} maxLength={60} /></label>
               <label><span>城市</span><input value={draft.city} onChange={(event) => update("city", event.target.value)} maxLength={60} /></label>
             </> : <>

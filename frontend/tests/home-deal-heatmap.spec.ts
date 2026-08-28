@@ -2,6 +2,7 @@
 
 import { expect, test, type Page } from "@playwright/test";
 
+import { createAdminSession, type AuthCookies } from "./auth-session";
 import { installFakeAmap } from "./fake-amap";
 
 const pageUrl = process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3100";
@@ -10,15 +11,21 @@ const adminPassword = process.env.ADMIN_PASSWORD;
 
 test.use({ launchOptions: { executablePath: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" } });
 
+let sessionCookies: AuthCookies = [];
+
+test.beforeAll(async ({ browser }) => {
+  test.skip(!adminUsername || !adminPassword, "需要 ADMIN_USERNAME 与 ADMIN_PASSWORD 验收真实主站");
+  sessionCookies = await createAdminSession(browser, pageUrl, adminUsername!, adminPassword!);
+});
+
+test.beforeEach(async ({ context }) => {
+  await context.addCookies(sessionCookies);
+});
+
 /** 使用真实服务端会话进入主站，业务数据则由用例路由精确控制。 */
 async function loginAndOpenHeatmap(page: Page): Promise<void> {
-  test.skip(!adminUsername || !adminPassword, "需要 ADMIN_USERNAME 与 ADMIN_PASSWORD 验收真实主站");
   await installFakeAmap(page);
-  await page.context().clearCookies();
   await page.goto(pageUrl, { waitUntil: "networkidle" });
-  await page.getByLabel("账号").fill(adminUsername!);
-  await page.getByLabel("密码").fill(adminPassword!);
-  await page.getByRole("button", { name: "进入网站" }).click();
   await expect(page.locator(".topbar")).toBeVisible();
   await page.getByRole("tab", { name: /全国成交热力地图/ }).click();
 }

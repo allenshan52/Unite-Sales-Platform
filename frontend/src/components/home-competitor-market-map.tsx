@@ -78,7 +78,11 @@ function CompetitorDealCard({ deal }: { deal: CompetitorDeal }) {
     <article className="competitor-deal-card">
       <div className="competitor-deal-overview">
         {firstProduct?.product_image_url
-          ? <img className="competitor-product-image" src={firstProduct.product_image_url} alt={`${productLabel}产品图片`} width="112" height="78" />
+          ? <>
+              {/* 情报图片来源域名不可预知且可能无稳定尺寸，保留带固定画布的原生图片以避免代理第三方内容。 */}
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img className="competitor-product-image" src={firstProduct.product_image_url} alt={`${productLabel}产品图片`} width="112" height="78" />
+            </>
           : <div className="competitor-product-image is-empty" role="img" aria-label="暂无产品图片">暂无产品图片</div>}
         <div><small>项目名称</small><h4>{deal.project_name}</h4><span>{deal.deal_type}</span></div>
       </div>

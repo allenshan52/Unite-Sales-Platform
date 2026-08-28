@@ -15,6 +15,7 @@ from app.models import (
     SalesProject,
     TypicalCase,
 )
+from app.sales_coverage import canonical_province
 from app.services.account_access import AccountDataScope, location_condition
 from app.typical_case_schemas import (
     MAINLAND_PROVINCE_ADCODES,
@@ -179,13 +180,25 @@ def get_public_typical_case(db: Session, case_id: UUID) -> TypicalCasePublicDeta
     )
 
 
-def list_admin_typical_case_overview(db: Session) -> TypicalCaseAdminOverview:
-    """合并真实案例与固定省份目录，让未配置省份也始终保留一个管理入口。"""
+def list_admin_typical_case_overview(
+    db: Session,
+    data_scope: AccountDataScope | None = None,
+) -> TypicalCaseAdminOverview:
+    """合并账号可见案例与省份目录，让可维护的未配置省份保留入口。"""
 
-    cases = list(db.scalars(_case_query().order_by(TypicalCase.province)).all())
+    statement = _case_query().order_by(TypicalCase.province)
+    if data_scope is not None and not data_scope.unrestricted:
+        statement = statement.where(location_condition(TypicalCase.province, TypicalCase.city, data_scope))
+    cases = list(db.scalars(statement).all())
     cases_by_province = {case.province: case for case in cases}
     items: list[TypicalCaseAdminListItem] = []
     for province, adcode in MAINLAND_PROVINCE_ADCODES.items():
+        if (
+            data_scope is not None
+            and not data_scope.unrestricted
+            and canonical_province(province) not in data_scope.visible_provinces
+        ):
+            continue
         case = cases_by_province.get(province)
         items.append(TypicalCaseAdminListItem(
             id=case.id if case else None,
@@ -210,10 +223,17 @@ def list_admin_typical_case_overview(db: Session) -> TypicalCaseAdminOverview:
     )
 
 
-def get_admin_typical_case(db: Session, case_id: UUID) -> TypicalCase:
-    """读取管理端完整案例，未找到时返回统一中文错误。"""
+def get_admin_typical_case(
+    db: Session,
+    case_id: UUID,
+    data_scope: AccountDataScope | None = None,
+) -> TypicalCase:
+    """读取账号范围内的管理端完整案例，越权与不存在统一返回 404。"""
 
-    case = db.scalar(_case_query().where(TypicalCase.id == case_id))
+    statement = _case_query().where(TypicalCase.id == case_id)
+    if data_scope is not None and not data_scope.unrestricted:
+        statement = statement.where(location_condition(TypicalCase.province, TypicalCase.city, data_scope))
+    case = db.scalar(statement)
     if case is None:
         raise HTTPException(status_code=404, detail="未找到该典型案例")
     return case

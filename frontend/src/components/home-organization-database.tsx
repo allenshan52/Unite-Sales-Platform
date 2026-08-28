@@ -5,6 +5,7 @@
 import { Search } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { apiFetch, queryString, type FilterOptions, type PublicOrganization, type PublicOrganizationPage } from "@/lib/api";
 
 type DatabaseFilters = { search: string; type: string; customerStatus: string; reviewStatus: string; province: string; city: string; district: string };
@@ -20,7 +21,7 @@ function formatFollowUpDate(value: string | null): string {
 /** 主页数据库面板：在固定高度的默认 8 条视图内展示单位，并允许更大页容量展开页面。 */
 export function HomeOrganizationDatabase() {
   const [filters, setFilters] = useState<DatabaseFilters>(emptyFilters);
-  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const debouncedSearch = useDebouncedValue(filters.search.trim());
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(8);
   const [options, setOptions] = useState<FilterOptions | null>(null);
@@ -33,12 +34,6 @@ export function HomeOrganizationDatabase() {
   const cityOptions = options?.cities ?? [];
   const districtOptions = options?.districts ?? [];
   const totalPages = Math.max(1, Math.ceil((page?.total ?? 0) / pageSize));
-
-  /** 搜索词短暂停顿后再请求，避免每个输入字符都占用一次数据库查询。 */
-  useEffect(() => {
-    const timeoutId = window.setTimeout(() => setDebouncedSearch(filters.search.trim()), 250);
-    return () => window.clearTimeout(timeoutId);
-  }, [filters.search]);
 
   /** 单独加载公开列表；取消过期请求，避免旧筛选结果覆盖新筛选结果。 */
   useEffect(() => {

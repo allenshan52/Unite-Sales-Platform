@@ -7,10 +7,12 @@ from uuid import UUID
 
 from fastapi.testclient import TestClient
 
+from app.admin_data_schemas import SalespersonProfileInput
 from app.database import get_db
 from app.main import app
 from app.models import SalesActivityType, UserRole
 from app.sales_coverage import SalesCoverageLevel
+from app.services import admin_salespeople as admin_salespeople_service
 from app.services.admin_salespeople import list_salesperson_profiles
 from app.services.auth import get_current_national_user, get_current_user
 
@@ -243,3 +245,56 @@ def test_admin_salesperson_profile_crud_routes(monkeypatch) -> None:
         "update": (UUID(int=501), "演示销售", 1, "admin_test"),
         "delete": (UUID(int=501), "admin_test"),
     }
+
+
+def test_salesperson_profile_update_syncs_linked_account_scopes(monkeypatch) -> None:
+    """销售页保存覆盖范围时在提交前同步所有关联授权账号。"""
+
+    salesperson_id = UUID(int=501)
+    salesperson = SimpleNamespace(
+        id=salesperson_id,
+        employee_code="DEMO-X001",
+        display_name="演示销售",
+        color="#2878B5",
+        coverage_center_longitude=116.4074,
+        coverage_center_latitude=39.9042,
+        is_active=True,
+        coverage_scopes=[],
+        activities=[],
+    )
+    request_payload = {
+        key: value
+        for key, value in salesperson_profile_payload().items()
+        if key not in {"id", "created_at", "updated_at"}
+    }
+    request_payload["coverage_scopes"] = [{
+        "scope_level": "省",
+        "scope_name": "河北",
+        "province": "河北",
+        "city": None,
+        "amap_adcode": None,
+    }]
+    request_payload["activities"] = []
+    payload = SalespersonProfileInput.model_validate(request_payload)
+    captured: dict[str, object] = {}
+    db = SimpleNamespace(add=lambda _record: None)
+
+    monkeypatch.setattr(admin_salespeople_service, "get_salesperson_profile", lambda *_args: salesperson)
+    monkeypatch.setattr(admin_salespeople_service, "_sync_children", lambda *_args: None)
+    monkeypatch.setattr(
+        admin_salespeople_service,
+        "sync_linked_account_scopes",
+        lambda _db, value: captured.update(salesperson_id=value) or 2,
+    )
+    monkeypatch.setattr(admin_salespeople_service, "_commit_profile", lambda _db: captured.update(committed=True))
+    monkeypatch.setattr(admin_salespeople_service, "to_profile_read", lambda value: value)
+
+    result = admin_salespeople_service.update_salesperson_profile(
+        db,  # type: ignore[arg-type]
+        salesperson_id,
+        payload,
+        "admin_test",
+    )
+
+    assert result is salesperson
+    assert captured == {"salesperson_id": salesperson_id, "committed": True}

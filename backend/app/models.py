@@ -392,7 +392,10 @@ class AdminSession(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     user: Mapped[AdminUser] = relationship(back_populates="sessions")
 
-    __table_args__ = (Index("ix_admin_session_expires_at", "expires_at"),)
+    __table_args__ = (
+        Index("ix_admin_session_expires_at", "expires_at"),
+        Index("ix_admin_session_user_id", "user_id"),
+    )
 
 
 class Organization(TimestampMixin, Base):

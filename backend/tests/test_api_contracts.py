@@ -6,14 +6,20 @@ from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
+from fastapi import HTTPException
+from fastapi.testclient import TestClient
+from pydantic import ValidationError
+
+from app.config import Settings
 from app.database import get_db
 from app.main import app
-from app.models import OrganizationContact, UserRole
-from app.sales_coverage import SalesCoverageLevel
+from app.models import AdminSession, OrganizationContact, UserRole
 from app.routers import auth as auth_router
 from app.routers import health as health_router
 from app.routers.organizations import filter_options
+from app.sales_coverage import SalesCoverageLevel
 from app.schemas import ContactUpdate, OrganizationAdminCreate, OrganizationCreate
+from app.services import auth as auth_service
 from app.services.auth import (
     CSRF_COOKIE_NAME,
     SESSION_COOKIE_NAME,
@@ -25,9 +31,36 @@ from app.services.organizations import (
     _sync_related_records,
     create_organization,
 )
-from fastapi import HTTPException
-from fastapi.testclient import TestClient
-from pydantic import ValidationError
+
+
+def test_unknown_login_uses_dummy_password_hash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """未知用户名仍执行 Argon2 占位校验，避免响应时间泄露账号是否存在。"""
+
+    checked: dict[str, str] = {}
+    db = SimpleNamespace(scalar=lambda _statement: None)
+    monkeypatch.setattr(auth_service, "ensure_initial_admin", lambda _db: None)
+    monkeypatch.setattr(
+        auth_service,
+        "get_settings",
+        lambda: SimpleNamespace(admin_login_max_attempts=5, admin_login_lock_seconds=60),
+    )
+    monkeypatch.setattr(
+        auth_service.password_hasher,
+        "verify",
+        lambda password, password_hash: checked.update(
+            password=password,
+            password_hash=password_hash,
+        ) or False,
+    )
+
+    with pytest.raises(HTTPException) as error:
+        auth_service.login_user(db, "missing-user", "demo-password")
+
+    assert error.value.status_code == 401
+    assert checked == {
+        "password": "demo-password",
+        "password_hash": auth_service._DUMMY_PASSWORD_HASH,
+    }
 
 
 def valid_university_payload() -> dict[str, object]:
@@ -543,6 +576,95 @@ def test_admin_can_update_primary_site(monkeypatch: pytest.MonkeyPatch) -> None:
         app.dependency_overrides.clear()
     assert response.status_code == 200
     assert response.json()["sites"][0]["province"] == "河南省"
+
+
+@pytest.mark.parametrize(
+    ("scope", "site", "changes"),
+    [
+        (
+            SimpleNamespace(scope_level=SalesCoverageLevel.province, scope_name="浙江省", province="浙江省", city=None),
+            SimpleNamespace(is_primary=True, province="浙江省", city="杭州市"),
+            {"province": "河南省", "city": "郑州市"},
+        ),
+        (
+            SimpleNamespace(scope_level=SalesCoverageLevel.city, scope_name="杭州市", province="浙江省", city="杭州市"),
+            SimpleNamespace(is_primary=True, province="浙江省", city="杭州市"),
+            {"city": "宁波市"},
+        ),
+    ],
+)
+def test_regional_user_cannot_move_organization_outside_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    scope: SimpleNamespace,
+    site: SimpleNamespace,
+    changes: dict[str, str],
+) -> None:
+    """区域账号的 PATCH 必须按合并后的最终主地点授权，不能借编辑跨区移动单位。"""
+
+    service_called = False
+
+    def fake_update(*_args: object, **_kwargs: object) -> object:
+        nonlocal service_called
+        service_called = True
+        return {}
+
+    monkeypatch.setattr("app.routers.organizations.require_organization_access", lambda *_args: None)
+    monkeypatch.setattr("app.routers.organizations.get_organization", lambda *_args: SimpleNamespace(sites=[site]))
+    monkeypatch.setattr("app.routers.organizations.update_organization", fake_update)
+    app.dependency_overrides[get_current_admin] = lambda: SimpleNamespace(
+        username="regional_test",
+        role=UserRole.employee,
+        coverage_scopes=[scope],
+    )
+    app.dependency_overrides[get_db] = lambda: object()
+    try:
+        with TestClient(app) as client:
+            response = client.patch(
+                f"/api/v1/organizations/{UUID(int=1)}",
+                json={"version": 1, "primary_site": changes},
+            )
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == 403
+    assert response.json()["detail"] == "当前账号不能修改该区域的数据"
+    assert service_called is False
+
+
+def test_cors_preflight_allows_put() -> None:
+    """跨源管理页面必须能预检项目实际使用的 PUT 更新接口。"""
+
+    with TestClient(app) as client:
+        response = client.options(
+            "/api/v1/admin-data/competitors/demo",
+            headers={
+                "Origin": "http://localhost:3100",
+                "Access-Control-Request-Method": "PUT",
+                "Access-Control-Request-Headers": "Content-Type",
+            },
+        )
+    assert response.status_code == 200
+    assert "PUT" in response.headers["access-control-allow-methods"]
+
+
+def test_settings_reject_wildcard_cors_with_credentials() -> None:
+    """凭据型 CORS 必须显式列出可信来源，不能使用浏览器不兼容的通配符。"""
+
+    with pytest.raises(ValidationError, match="CORS_ORIGINS"):
+        Settings(
+            _env_file=None,
+            postgres_db="demo",
+            postgres_user="demo",
+            postgres_password="demo-password",
+            admin_username="admin_demo",
+            admin_password="demo-password-at-least-16",
+            cors_origins="*",
+        )
+
+
+def test_admin_session_user_id_is_indexed() -> None:
+    """停用或删除账号时按 user_id 撤销会话必须使用外键索引。"""
+
+    assert "ix_admin_session_user_id" in {index.name for index in AdminSession.__table__.indexes}
 
 
 @pytest.mark.parametrize(

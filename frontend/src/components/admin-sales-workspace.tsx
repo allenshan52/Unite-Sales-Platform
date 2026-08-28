@@ -12,6 +12,7 @@ import {
   type SalesCoverageLevel,
   type SalespersonProfile,
 } from "@/lib/api";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { useLatestRequest } from "@/hooks/use-latest-request";
 import { canonicalSalesProvince, salesCoverageLevels, salesProvinces, salesRegionDescription, salesRegions } from "@/lib/sales-coverage";
 
@@ -221,7 +222,7 @@ function SalespersonDeleteDialog({ item, onCancel, onConfirm }: { item: Salesper
 /** 销售页只保留人员列表，所有明细通过完整档案按需加载。 */
 export function AdminSalesWorkspace() {
   const [search, setSearch] = useState("");
-  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const debouncedSearch = useDebouncedValue(search.trim());
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
   const [page, setPage] = useState<SalespersonPage | null>(null);
@@ -236,7 +237,6 @@ export function AdminSalesWorkspace() {
   const { run: runDetailRequest } = useLatestRequest();
   const totalPages = Math.max(1, Math.ceil((page?.total ?? 0) / pageSize));
 
-  useEffect(() => { const timeoutId = window.setTimeout(() => setDebouncedSearch(search.trim()), 250); return () => window.clearTimeout(timeoutId); }, [search]);
   useEffect(() => { if (!notice) return; const timeoutId = window.setTimeout(() => setNotice(null), 2400); return () => window.clearTimeout(timeoutId); }, [notice]);
 
   /** 读取当前销售人员分页，并取消已经过期的列表请求。 */

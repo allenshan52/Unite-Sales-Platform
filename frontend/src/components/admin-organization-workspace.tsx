@@ -11,6 +11,7 @@ import { AccessLoginPanel } from "@/components/access-login-panel";
 import { AdminOrganizationMap } from "@/components/admin-organization-map";
 import { AdminProductItemsEditor, emptyProductItem, productItemFromApi, type ProductItemDraft } from "@/components/admin-product-items-editor";
 import { ADMIN_SECTION_TABS, type AdminSection } from "@/lib/admin-data-config";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { useLatestRequest } from "@/hooks/use-latest-request";
 import {
   apiDownload,
@@ -555,7 +556,7 @@ export function AdminOrganizationWorkspace() {
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [activeSection, setActiveSection] = useState<AdminSection>("organizations");
   const [filters, setFilters] = useState<Filters>(emptyFilters);
-  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const debouncedSearch = useDebouncedValue(filters.search.trim());
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
   const [options, setOptions] = useState<FilterOptions | null>(null);
@@ -607,12 +608,6 @@ export function AdminOrganizationWorkspace() {
       });
     return () => controller.abort();
   }, []);
-
-  /** 搜索词短暂停顿后再查询，减少键入过程中的重复数据库请求。 */
-  useEffect(() => {
-    const timeoutId = window.setTimeout(() => setDebouncedSearch(filters.search.trim()), 250);
-    return () => window.clearTimeout(timeoutId);
-  }, [filters.search]);
 
   /** 后台枚举与省份选项只读取一次；失败不阻断列表和地图的独立请求。 */
   useEffect(() => {

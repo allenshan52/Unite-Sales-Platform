@@ -7,6 +7,7 @@ import { Check, CircleAlert, Database, Pencil, Plus, Save, Search, Trash2, X } f
 
 import { apiFetch, queryString } from "@/lib/api";
 import { AdminProductItemsEditor, productItemFromApi, productItemPayload, type ProductItemDraft } from "@/components/admin-product-items-editor";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import {
   ADMIN_SECTION_CONFIGS,
   type AdminFieldConfig,
@@ -206,7 +207,7 @@ export function AdminDataWorkspace({ section }: { section: DataSection }) {
   const sectionConfig = ADMIN_SECTION_CONFIGS[section];
   const [resourceKey, setResourceKey] = useState(sectionConfig.resources[0].key);
   const [search, setSearch] = useState("");
-  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const debouncedSearch = useDebouncedValue(search.trim());
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
   const [page, setPage] = useState<AdminDataPage | null>(null);
@@ -222,7 +223,6 @@ export function AdminDataWorkspace({ section }: { section: DataSection }) {
   const apiResource = resourceConfig.resource ?? resourceConfig.key;
   const listFields = resourceConfig.listFields.map((name) => resourceConfig.fields.find((field) => field.name === name) ?? { name, label: name, kind: "text" as const });
 
-  useEffect(() => { const timeoutId = window.setTimeout(() => setDebouncedSearch(search.trim()), 250); return () => window.clearTimeout(timeoutId); }, [search]);
   useEffect(() => { if (!notice) return; const timeoutId = window.setTimeout(() => setNotice(null), 2200); return () => window.clearTimeout(timeoutId); }, [notice]);
 
   /** 读取当前分类分页，并取消前一次尚未完成的请求。 */

@@ -47,7 +47,7 @@ export function AccessLoginPanel({ audience, requiredRole, onLoggedIn }: AccessL
       <form className="admin-login-card" onSubmit={submitLogin}>
         <div className="admin-kicker"><ShieldCheck size={16} />{isAdmin ? "内部数据审核" : "公司内部访问"}</div>
         <h1>{isAdmin ? "目标单位数据库" : "全国销售网络作战地图"}</h1>
-        <p>{isAdmin ? "第一阶段仅超级管理员可维护业务数据和账号覆盖范围。" : "此系统仅供公司内部授权人员使用，请先登录。"}</p>
+        <p>{isAdmin ? "授权账号可维护负责范围内的业务数据；账号与销售主档按管理权限开放。" : "此系统仅供公司内部授权人员使用，请先登录。"}</p>
         <label>账号<input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" required autoFocus /></label>
         <label>密码<input value={password} onChange={(event) => setPassword(event.target.value)} type="password" autoComplete="current-password" required /></label>
         {error ? <p className="admin-form-error" role="alert"><CircleAlert size={15} />{error}</p> : null}

@@ -147,24 +147,21 @@ function useInsightsOverview(year: number, period: InsightsPeriod, metric: Insig
   const [version, setVersion] = useState(0);
 
   useEffect(() => {
-    if (!enabled) {
-      setData(null);
-      setLoading(false);
-      setError(null);
-      return;
-    }
     const controller = new AbortController();
-    setData(null);
-    setLoading(true);
-    setError(null);
-    apiFetch<InsightsOverview>(`/public/insights/overview${queryString({ year: String(year), period, metric, scope_mode: scopeMode, province })}`, { signal: controller.signal })
-      .then(setData)
-      .catch((requestError: unknown) => {
-        if (requestError instanceof DOMException && requestError.name === "AbortError") return;
-        setError(requestError instanceof Error ? requestError.message : "数据洞察加载失败");
-      })
-      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
-    return () => controller.abort();
+    const timeoutId = window.setTimeout(() => {
+      setData(null);
+      setLoading(enabled);
+      setError(null);
+      if (!enabled) return;
+      void apiFetch<InsightsOverview>(`/public/insights/overview${queryString({ year: String(year), period, metric, scope_mode: scopeMode, province })}`, { signal: controller.signal })
+        .then(setData)
+        .catch((requestError: unknown) => {
+          if (requestError instanceof DOMException && requestError.name === "AbortError") return;
+          setError(requestError instanceof Error ? requestError.message : "数据洞察加载失败");
+        })
+        .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    }, 0);
+    return () => { window.clearTimeout(timeoutId); controller.abort(); };
   }, [enabled, metric, period, province, scopeMode, version, year]);
 
   return { data, loading, error, retry: () => setVersion((current) => current + 1) };
@@ -209,17 +206,20 @@ export function HomeDataInsights() {
     : Math.max(0, ...[...nationalRegionByMapId.values()].map((item) => Number(item.metric_value)));
 
   useEffect(() => {
-    setSelectedCity(null);
-    setCityOverview(null);
-    setCityError(null);
+    const frame = requestAnimationFrame(() => {
+      setSelectedCity(null);
+      setCityOverview(null);
+      setCityError(null);
+    });
+    return () => cancelAnimationFrame(frame);
   }, [metric, period, scopeMode, selectedProvince, year]);
 
   useEffect(() => {
-    if (!selectedProvince) {
-      setMapViewBox(chinaMap.viewBox);
-      return;
-    }
     const frame = requestAnimationFrame(() => {
+      if (!selectedProvince) {
+        setMapViewBox(chinaMap.viewBox);
+        return;
+      }
       const mapId = provinceIdByName.get(selectedProvince);
       const path = mapId ? rootRef.current?.querySelector<SVGGraphicsElement>(`[data-insight-province="${mapId}"]`) : null;
       if (!path) return;

@@ -6,15 +6,20 @@ from io import BytesIO
 from types import SimpleNamespace
 from uuid import UUID
 
-from app.database import get_db
-from app.main import app
-from app.models import TypicalCase
-from app.services.auth import get_current_admin
-from app.services.typical_cases import get_public_typical_case
-from app.typical_case_schemas import TypicalCaseInput
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from PIL import Image
 from pydantic import ValidationError
+
+from app.database import get_db
+from app.main import app
+from app.models import TypicalCase, UserRole
+from app.sales_coverage import SalesCoverageLevel
+from app.services.auth import get_current_admin
+from app.services.typical_case_media import MAX_IMAGE_PIXELS, _normalize_image
+from app.services.typical_cases import get_public_typical_case
+from app.typical_case_schemas import TypicalCaseInput
 
 CASE_ID = UUID("00000000-0000-4000-8000-000000006005")
 PROJECT_ID = UUID("00000000-0000-4000-8000-000000005307")
@@ -166,7 +171,7 @@ def test_admin_typical_case_overview_returns_lightweight_rows(monkeypatch) -> No
     }
     monkeypatch.setattr(
         "app.routers.admin_typical_cases.list_admin_typical_case_overview",
-        lambda _db: payload,
+        lambda _db, _scope: payload,
     )
     app.dependency_overrides[get_current_admin] = lambda: SimpleNamespace(username="admin_test")
     app.dependency_overrides[get_db] = lambda: object()
@@ -178,6 +183,36 @@ def test_admin_typical_case_overview_returns_lightweight_rows(monkeypatch) -> No
     assert response.status_code == 200
     assert response.json()["total_regions"] == 31
     assert "challenge" not in response.json()["items"][0]
+
+
+def test_admin_typical_case_overview_receives_regional_scope(monkeypatch) -> None:
+    """案例后台列表必须把区域账号范围传入服务层，公开案例全国策略不受影响。"""
+
+    captured: dict[str, object] = {}
+
+    def fake_overview(_db: object, scope: object) -> dict[str, object]:
+        captured["scope"] = scope
+        return {"total_regions": 0, "configured_count": 0, "draft_count": 0, "published_count": 0, "items": []}
+
+    monkeypatch.setattr("app.routers.admin_typical_cases.list_admin_typical_case_overview", fake_overview)
+    app.dependency_overrides[get_current_admin] = lambda: SimpleNamespace(
+        username="zhejiang_test",
+        role=UserRole.employee,
+        coverage_scopes=[SimpleNamespace(
+            scope_level=SalesCoverageLevel.province,
+            scope_name="浙江省",
+            province="浙江省",
+            city=None,
+        )],
+    )
+    app.dependency_overrides[get_db] = lambda: object()
+    try:
+        with TestClient(app) as client:
+            response = client.get("/api/v1/admin-typical-cases")
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == 200
+    assert captured["scope"].visible_provinces == frozenset({"浙江"})
 
 
 def test_admin_typical_case_image_upload_requires_session() -> None:
@@ -234,6 +269,32 @@ def test_admin_typical_case_image_upload_rejects_fake_image(monkeypatch, tmp_pat
     finally:
         app.dependency_overrides.clear()
     assert response.status_code == 422
+    assert not list(tmp_path.iterdir())
+
+
+def test_typical_case_image_rejects_pixel_bomb_before_decode(monkeypatch, tmp_path) -> None:
+    """超限尺寸必须在 load 解码前返回 413，避免压缩炸弹消耗大量内存。"""
+
+    loaded = False
+
+    class OversizedImage:
+        size = (MAX_IMAGE_PIXELS + 1, 1)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def load(self) -> None:
+            nonlocal loaded
+            loaded = True
+
+    monkeypatch.setattr("app.services.typical_case_media.Image.open", lambda *_args: OversizedImage())
+    with pytest.raises(HTTPException) as error:
+        _normalize_image(b"compressed-demo", tmp_path)
+    assert error.value.status_code == 413
+    assert loaded is False
     assert not list(tmp_path.iterdir())
 
 

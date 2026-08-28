@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Check, CircleAlert, PackageSearch, Pencil, Plus, Search, Trash2 } from "lucide-react";
 
 import { AdminDealDeleteDialog, AdminDealFormDialog, type AdminDealWriteRequest } from "@/components/admin-deal-form-dialog";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { apiFetch, queryString, type AdminDealFilterOptions, type AdminDealItem, type AdminDealPage, type AdminDealSeller } from "@/lib/api";
 
 const emptyOptions: AdminDealFilterOptions = { competitors: [], suppliers: [], years: [] };
@@ -24,7 +25,7 @@ export function AdminDealWorkspace() {
   const [supplier, setSupplier] = useState("");
   const [competitorId, setCompetitorId] = useState("");
   const [product, setProduct] = useState("");
-  const [debouncedProduct, setDebouncedProduct] = useState("");
+  const debouncedProduct = useDebouncedValue(product.trim());
   const [year, setYear] = useState("");
   const [pageNumber, setPageNumber] = useState(1);
   const [options, setOptions] = useState(emptyOptions);
@@ -37,7 +38,6 @@ export function AdminDealWorkspace() {
   const [deleteTarget, setDeleteTarget] = useState<AdminDealItem | null>(null);
   const [revision, setRevision] = useState(0);
 
-  useEffect(() => { const timer = window.setTimeout(() => setDebouncedProduct(product.trim()), 250); return () => window.clearTimeout(timer); }, [product]);
   useEffect(() => { void apiFetch<AdminDealFilterOptions>("/admin-deals/options").then(setOptions).catch(() => setOptions(emptyOptions)); }, [revision]);
   useEffect(() => { if (!notice) return; const timer = window.setTimeout(() => setNotice(null), 2200); return () => window.clearTimeout(timer); }, [notice]);
 
@@ -50,12 +50,14 @@ export function AdminDealWorkspace() {
 
   useEffect(() => {
     const controller = new AbortController();
-    setLoading(true); setError(null);
-    void apiFetch<AdminDealPage>(`/admin-deals${query}`, { signal: controller.signal })
-      .then(setPage)
-      .catch((requestError: unknown) => { if (!(requestError instanceof DOMException && requestError.name === "AbortError")) setError(requestError instanceof Error ? requestError.message : "成交订单加载失败"); })
-      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
-    return () => controller.abort();
+    const timeoutId = window.setTimeout(() => {
+      setLoading(true); setError(null);
+      void apiFetch<AdminDealPage>(`/admin-deals${query}`, { signal: controller.signal })
+        .then(setPage)
+        .catch((requestError: unknown) => { if (!(requestError instanceof DOMException && requestError.name === "AbortError")) setError(requestError instanceof Error ? requestError.message : "成交订单加载失败"); })
+        .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    }, 0);
+    return () => { window.clearTimeout(timeoutId); controller.abort(); };
   }, [query, revision]);
 
   const totalPages = Math.max(1, Math.ceil((page?.total ?? 0) / 20));

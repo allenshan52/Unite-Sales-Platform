@@ -193,14 +193,23 @@ def test_super_admin_can_update_another_user(monkeypatch) -> None:
 
 
 def test_scope_update_flushes_removed_rows_before_reinserting_retained_scope(monkeypatch) -> None:
-    """保留杭州市并新增重庆时，旧范围必须先删除，避免唯一约束误报重复。"""
+    """关联账号修改范围时把完整新范围交给销售与账号共享同步服务。"""
 
     target = SimpleNamespace(
         id=UUID(int=2), role=UserRole.employee, is_active=True,
         coverage_scopes=[SimpleNamespace(scope_level=SalesCoverageLevel.city, scope_name="杭州市")],
     )
     db = MagicMock()
+    captured: dict[str, object] = {}
     monkeypatch.setattr(authorized_user_service, "_get_authorized_user", lambda *_args, **_kwargs: target)
+    monkeypatch.setattr(
+        authorized_user_service,
+        "replace_salesperson_and_linked_account_scopes",
+        lambda _db, salesperson_id, values: captured.update(
+            salesperson_id=salesperson_id,
+            scopes=list(values),
+        ),
+    )
     scopes = [
         AuthorizedUserCoverageScopeInput.model_validate({
             "scope_level": "市", "scope_name": "杭州市", "province": "浙江", "city": "杭州市", "amap_adcode": "330100",
@@ -212,8 +221,9 @@ def test_scope_update_flushes_removed_rows_before_reinserting_retained_scope(mon
 
     authorized_user_service.update_authorized_user(db, target.id, is_active=True, salesperson_id=UUID(int=501), coverage_scopes=scopes)
 
-    assert [scope.scope_name for scope in target.coverage_scopes] == ["杭州市", "重庆市"]
-    assert db.method_calls.index(call.flush()) < db.method_calls.index(call.commit())
+    assert captured["salesperson_id"] == UUID(int=501)
+    assert [scope.scope_name for scope in captured["scopes"]] == ["杭州市", "重庆市"]
+    assert call.commit() in db.method_calls
 
 
 def test_super_admin_can_delete_another_user(monkeypatch) -> None:

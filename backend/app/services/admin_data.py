@@ -60,6 +60,7 @@ from app.services.account_access import (
     require_competitor_access,
     require_location_access,
 )
+from app.services.coverage_sync import sync_linked_account_scopes
 from app.services.geocoding import gcj02_to_wgs84
 
 
@@ -515,7 +516,7 @@ def _commit_or_error(db: Session) -> None:
 
 
 def create_admin_data(db: Session, resource: str, values: dict[str, Any], actor_username: str) -> dict[str, Any]:
-    """新增一条完整业务记录并写入通用管理员审计日志。"""
+    """新增完整业务记录并审计；销售范围写入同时镜像到关联账号。"""
 
     definition = _definition(resource)
     prepared = _prepare_values(db, definition, values, None)
@@ -526,6 +527,8 @@ def create_admin_data(db: Session, resource: str, values: dict[str, Any], actor_
     if definition.model is CompetitorDeal:
         _sync_competitor_deal_products(db, record, product_payloads)
     db.add(record)
+    if definition.model is SalespersonCoverageScope:
+        sync_linked_account_scopes(db, record.salesperson_id)
     db.add(AuditLog(
         organization_id=None,
         actor_username=actor_username,
@@ -544,12 +547,13 @@ def update_admin_data(
     values: dict[str, Any],
     actor_username: str,
 ) -> dict[str, Any]:
-    """以完整表单覆盖一条业务记录，禁止修改主键和系统时间。"""
+    """以完整表单覆盖业务记录；销售范围变更同时镜像到新旧关联账号。"""
 
     definition = _definition(resource)
     record = db.get(definition.model, record_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"未找到该{definition.label}")
+    previous_salesperson_id = record.salesperson_id if definition.model is SalespersonCoverageScope else None
     prepared = _prepare_values(db, definition, values, record_id)
     product_payloads = prepared.pop("products", None) if definition.model is CompetitorDeal else None
     if definition.model is CompetitorDeal and product_payloads is not None:
@@ -558,6 +562,10 @@ def update_admin_data(
         setattr(record, name, value)
     if product_payloads is not None:
         _sync_competitor_deal_products(db, record, product_payloads)
+    if definition.model is SalespersonCoverageScope:
+        salesperson_ids = {previous_salesperson_id, record.salesperson_id}
+        for salesperson_id in sorted((item for item in salesperson_ids if item is not None), key=str):
+            sync_linked_account_scopes(db, salesperson_id)
     db.add(AuditLog(
         organization_id=None,
         actor_username=actor_username,
@@ -570,13 +578,16 @@ def update_admin_data(
 
 
 def delete_admin_data(db: Session, resource: str, record_id: UUID, actor_username: str) -> None:
-    """永久删除一条白名单业务记录，并依赖既有外键约束保护关联完整性。"""
+    """删除白名单记录；销售范围删除同时镜像到关联账号并保留外键保护。"""
 
     definition = _definition(resource)
     record = db.get(definition.model, record_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"未找到该{definition.label}")
+    salesperson_id = record.salesperson_id if definition.model is SalespersonCoverageScope else None
     db.delete(record)
+    if salesperson_id is not None:
+        sync_linked_account_scopes(db, salesperson_id)
     db.add(AuditLog(
         organization_id=None,
         actor_username=actor_username,

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from app.models import AdminSession, AdminUser, AdminUserCoverageScope, Salesperson, UserRole
 from app.schemas import AuthorizedUserCoverageScopeInput
 from app.services.auth import password_hasher
+from app.services.coverage_sync import replace_salesperson_and_linked_account_scopes
 
 
 def list_authorized_users(db: Session) -> list[AdminUser]:
@@ -57,7 +58,7 @@ def create_authorized_user(
     salesperson_id: UUID | None,
     coverage_scopes: list[AuthorizedUserCoverageScopeInput],
 ) -> AdminUser:
-    """哈希普通用户密码、原子保存范围并把重复用户名翻译为可读冲突响应。"""
+    """创建普通账号；有关联销售时，把提交范围同步到销售及其全部账号。"""
 
     _validate_salesperson(db, salesperson_id)
     user = AdminUser(
@@ -65,10 +66,13 @@ def create_authorized_user(
         salesperson_id=salesperson_id,
         password_hash=password_hasher.hash(password),
         role=UserRole.employee,
-        coverage_scopes=_scope_records(coverage_scopes),
     )
     try:
         db.add(user)
+        if salesperson_id is None:
+            user.coverage_scopes.extend(_scope_records(coverage_scopes))
+        else:
+            replace_salesperson_and_linked_account_scopes(db, salesperson_id, coverage_scopes)
         db.commit()
     except IntegrityError as exc:
         db.rollback()
@@ -85,7 +89,7 @@ def update_authorized_user(
     salesperson_id: UUID | None,
     coverage_scopes: list[AuthorizedUserCoverageScopeInput],
 ) -> AdminUser:
-    """原子替换普通用户的状态与范围；超级管理员账号始终保持只读。"""
+    """原子替换普通账号状态；有关联销售时双向统一该销售的全部账号范围。"""
 
     target = _get_authorized_user(db, user_id, for_update=True)
     if target.role == UserRole.admin:
@@ -94,9 +98,12 @@ def update_authorized_user(
     target.is_active = is_active
     target.salesperson_id = salesperson_id
     try:
-        target.coverage_scopes.clear()
-        db.flush()
-        target.coverage_scopes.extend(_scope_records(coverage_scopes))
+        if salesperson_id is None:
+            target.coverage_scopes.clear()
+            db.flush()
+            target.coverage_scopes.extend(_scope_records(coverage_scopes))
+        else:
+            replace_salesperson_and_linked_account_scopes(db, salesperson_id, coverage_scopes)
         if not is_active:
             db.execute(delete(AdminSession).where(AdminSession.user_id == target.id))
         db.commit()

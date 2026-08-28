@@ -1,11 +1,25 @@
 /** 首页单位地图响应式验收：保证默认入口在窄屏内收缩，并把地图标签滚动限制在自身轨道。 */
 import { expect, test } from "@playwright/test";
 
+import { createAdminSession, type AuthCookies } from "./auth-session";
 import { installFakeAmap } from "./fake-amap";
 
 const pageUrl = process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3100";
+const adminUsername = process.env.ADMIN_USERNAME;
+const adminPassword = process.env.ADMIN_PASSWORD;
 
 test.use({ launchOptions: { executablePath: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" } });
+
+let sessionCookies: AuthCookies = [];
+
+test.beforeAll(async ({ browser }) => {
+  test.skip(!adminUsername || !adminPassword, "需要管理员凭据验收受保护的单位地图");
+  sessionCookies = await createAdminSession(browser, pageUrl, adminUsername!, adminPassword!);
+});
+
+test.beforeEach(async ({ context }) => {
+  await context.addCookies(sessionCookies);
+});
 
 /** 用稳定的单位点位和筛选项打开默认地图，避免验收依赖数据库中的演示记录数量。 */
 async function openOrganizationMap(page: import("@playwright/test").Page): Promise<void> {

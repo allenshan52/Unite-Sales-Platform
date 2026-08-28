@@ -24,6 +24,7 @@ import {
   type AdminDataItem,
   type AdminDataPage,
 } from "@/components/admin-data-workspace";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { ADMIN_SECTION_CONFIGS, type AdminResourceConfig } from "@/lib/admin-data-config";
 import { apiFetch, queryString, type CompetitorDetail } from "@/lib/api";
 
@@ -103,7 +104,7 @@ function CompetitorResourcePanel({ configKey, ownerField, ownerId, listFields, e
   const baseConfig = resourceConfig(configKey);
   const config = useMemo(() => ({ ...baseConfig, filters: { ...baseConfig.filters, [ownerField]: ownerId } }), [baseConfig, ownerField, ownerId]);
   const [search, setSearch] = useState("");
-  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const debouncedSearch = useDebouncedValue(search.trim());
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
   const [page, setPage] = useState<AdminDataPage | null>(null);
@@ -117,7 +118,6 @@ function CompetitorResourcePanel({ configKey, ownerField, ownerId, listFields, e
   const fields = listFields.map((name) => config.fields.find((field) => field.name === name) ?? { name, label: name, kind: "text" as const });
   const totalPages = Math.max(1, Math.ceil((page?.total ?? 0) / pageSize));
 
-  useEffect(() => { const timer = window.setTimeout(() => setDebouncedSearch(search.trim()), 250); return () => window.clearTimeout(timer); }, [search]);
   useEffect(() => { if (!notice) return; const timer = window.setTimeout(() => setNotice(null), 2200); return () => window.clearTimeout(timer); }, [notice]);
 
   /** 取消旧请求并读取当前父记录下的一页子资源。 */
@@ -212,7 +212,7 @@ function CompetitorDetailWorkspace({ competitor, onBack, onEdit, onDelete, onCha
 export function AdminCompetitorWorkspace() {
   const mainConfig = resourceConfig("competitors");
   const [search, setSearch] = useState("");
-  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const debouncedSearch = useDebouncedValue(search.trim());
   const [activeFilter, setActiveFilter] = useState("all");
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
@@ -228,7 +228,6 @@ export function AdminCompetitorWorkspace() {
   const selected = page?.items.find((item) => item.id === selectedId) ?? null;
   const totalPages = Math.max(1, Math.ceil((page?.total ?? 0) / pageSize));
 
-  useEffect(() => { const timer = window.setTimeout(() => setDebouncedSearch(search.trim()), 250); return () => window.clearTimeout(timer); }, [search]);
   useEffect(() => { if (!notice) return; const timer = window.setTimeout(() => setNotice(null), 2200); return () => window.clearTimeout(timer); }, [notice]);
 
   /** 读取同行聚合页；详情子资源变化后复用该函数刷新摘要。 */

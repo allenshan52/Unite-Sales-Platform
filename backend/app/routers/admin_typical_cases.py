@@ -8,8 +8,9 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import AdminUser
-from app.services.auth import get_current_admin
 from app.services.account_access import account_data_scope, require_location_access
+from app.services.auth import get_current_admin
+from app.services.typical_case_media import store_typical_case_image
 from app.services.typical_cases import (
     create_typical_case,
     delete_typical_case,
@@ -19,7 +20,6 @@ from app.services.typical_cases import (
     to_admin_read,
     update_typical_case,
 )
-from app.services.typical_case_media import store_typical_case_image
 from app.typical_case_schemas import (
     TypicalCaseAdminOverview,
     TypicalCaseAdminRead,
@@ -53,11 +53,11 @@ def project_options(
 @router.get("", response_model=TypicalCaseAdminOverview)
 def list_cases(
     db: Annotated[Session, Depends(get_db)],
-    _user: Annotated[AdminUser, Depends(get_current_admin)],
+    user: Annotated[AdminUser, Depends(get_current_admin)],
 ) -> TypicalCaseAdminOverview:
-    """固定返回 31 个省份槽位，案例正文只在点击后读取。"""
+    """只返回账号负责省份的轻量案例槽位，案例正文仍按需读取。"""
 
-    return list_admin_typical_case_overview(db)
+    return list_admin_typical_case_overview(db, account_data_scope(user))
 
 
 @router.post("/images", response_model=TypicalCaseImageUploadRead, status_code=status.HTTP_201_CREATED)
@@ -74,11 +74,11 @@ async def upload_image(
 def get_case(
     case_id: UUID,
     db: Annotated[Session, Depends(get_db)],
-    _user: Annotated[AdminUser, Depends(get_current_admin)],
+    user: Annotated[AdminUser, Depends(get_current_admin)],
 ) -> TypicalCaseAdminRead:
-    """读取一条可编辑的完整案例。"""
+    """只读取账号负责区域内的一条可编辑完整案例。"""
 
-    return to_admin_read(get_admin_typical_case(db, case_id))
+    return to_admin_read(get_admin_typical_case(db, case_id, account_data_scope(user)))
 
 
 @router.post("", response_model=TypicalCaseAdminRead, status_code=status.HTTP_201_CREATED)

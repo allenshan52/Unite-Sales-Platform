@@ -2,11 +2,25 @@
 
 import { expect, test } from "@playwright/test";
 
+import { createAdminSession, type AuthCookies } from "./auth-session";
 import { installFakeAmap } from "./fake-amap";
 
 const pageUrl = process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3100";
+const adminUsername = process.env.ADMIN_USERNAME;
+const adminPassword = process.env.ADMIN_PASSWORD;
 
 test.use({ launchOptions: { executablePath: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" } });
+
+let sessionCookies: AuthCookies = [];
+
+test.beforeAll(async ({ browser }) => {
+  test.skip(!adminUsername || !adminPassword, "需要管理员凭据验收真实集团数据");
+  sessionCookies = await createAdminSession(browser, pageUrl, adminUsername!, adminPassword!);
+});
+
+test.beforeEach(async ({ context }) => {
+  await context.addCookies(sessionCookies);
+});
 
 /** 等待 React 完成 hydration 后切换地图入口，避免开发容器冷编译时吞掉首次点击。 */
 async function openGroupNetwork(page: import("@playwright/test").Page): Promise<void> {

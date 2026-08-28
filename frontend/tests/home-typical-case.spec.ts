@@ -1,13 +1,27 @@
-/** 第六地图浏览器验收：验证真实 API、发布/筹备交互、失败恢复和移动端边界。 */
+/** 典型案例地图浏览器验收：验证真实 API、发布/筹备交互、失败恢复和移动端边界。 */
 import { expect, test } from "@playwright/test";
 
+import { createAdminSession, type AuthCookies } from "./auth-session";
 import { installFakeAmap } from "./fake-amap";
 
 const pageUrl = process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3100";
+const adminUsername = process.env.ADMIN_USERNAME;
+const adminPassword = process.env.ADMIN_PASSWORD;
 
 test.use({ launchOptions: { executablePath: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" } });
 
-/** 打开主页第六入口并等待案例地图完成真实数据加载。 */
+let sessionCookies: AuthCookies = [];
+
+test.beforeAll(async ({ browser }) => {
+  test.skip(!adminUsername || !adminPassword, "需要管理员凭据验收受保护的典型案例");
+  sessionCookies = await createAdminSession(browser, pageUrl, adminUsername!, adminPassword!);
+});
+
+test.beforeEach(async ({ context }) => {
+  await context.addCookies(sessionCookies);
+});
+
+/** 打开主页案例入口并等待真实数据加载。 */
 async function openTypicalCases(page: import("@playwright/test").Page): Promise<void> {
   await installFakeAmap(page);
   await page.goto(pageUrl, { waitUntil: "domcontentloaded" });

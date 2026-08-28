@@ -20,6 +20,7 @@ from app.admin_data_schemas import (
     SalespersonProfileRead,
 )
 from app.models import AuditLog, SalesActivity, SalesActivityType, Salesperson, SalespersonCoverageScope, SalesProject
+from app.services.coverage_sync import sync_linked_account_scopes
 from app.services.salespeople import month_cutoff
 
 
@@ -218,18 +219,24 @@ def update_salesperson_profile(
     payload: SalespersonProfileInput,
     actor_username: str,
 ) -> SalespersonProfileRead:
-    """原子覆盖销售主档并同步两个子集合，失败时整笔事务回滚。"""
+    """原子覆盖销售主档、两个子集合及关联账号范围，失败时整笔事务回滚。"""
 
     salesperson = get_salesperson_profile(db, salesperson_id)
     for field_name, value in payload.model_dump(exclude={"coverage_scopes", "activities"}).items():
         setattr(salesperson, field_name, value)
     _sync_children(db, salesperson.coverage_scopes, payload.coverage_scopes, SalespersonCoverageScope, "覆盖范围")
     _sync_children(db, salesperson.activities, payload.activities, SalesActivity, "销售活动")
+    linked_account_count = sync_linked_account_scopes(db, salesperson_id)
     db.add(AuditLog(
         organization_id=None,
         actor_username=actor_username,
         action="编辑销售人员档案",
-        detail={"销售人员ID": str(salesperson.id), "覆盖范围数量": len(payload.coverage_scopes), "活动数量": len(payload.activities)},
+        detail={
+            "销售人员ID": str(salesperson.id),
+            "覆盖范围数量": len(payload.coverage_scopes),
+            "活动数量": len(payload.activities),
+            "同步账号数量": linked_account_count,
+        },
     ))
     _commit_profile(db)
     return to_profile_read(get_salesperson_profile(db, salesperson_id))

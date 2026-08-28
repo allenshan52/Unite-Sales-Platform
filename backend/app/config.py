@@ -47,10 +47,12 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def require_secure_cookie_in_production(self) -> "Settings":
-        """生产环境拒绝不安全管理员 Cookie，避免配置遗漏后明文传输会话。"""
+        """拒绝不安全生产 Cookie 及与凭据请求不兼容的通配 CORS 来源。"""
 
         if self.app_environment.lower() == "production" and not self.admin_cookie_secure:
             raise ValueError("生产环境必须设置 ADMIN_COOKIE_SECURE=true")
+        if "*" in {origin.strip() for origin in self.cors_origins.split(",")}:
+            raise ValueError("CORS_ORIGINS 不能使用通配符，必须显式列出可信来源")
         return self
 
     @property
