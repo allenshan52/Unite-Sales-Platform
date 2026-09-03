@@ -6,6 +6,7 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "re
 import { Check, CircleAlert, Database, Pencil, Plus, Save, Search, Trash2, X } from "lucide-react";
 
 import { apiFetch, queryString } from "@/lib/api";
+import { AmapLocationSearch, type AmapLocationSelection } from "@/components/amap-location-search";
 import { AdminProductItemsEditor, productItemFromApi, productItemPayload, type ProductItemDraft } from "@/components/admin-product-items-editor";
 import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import {
@@ -33,6 +34,46 @@ interface AdminDataOption {
 }
 
 const pageSizeOptions = [10, 25, 50, 75, 100];
+const locationCoordinateFields = new Set(["longitude", "latitude", "display_longitude", "display_latitude", "coverage_center_longitude", "coverage_center_latitude"]);
+
+/** 判断资源是否包含可由高德搜索统一回填的坐标字段。 */
+function hasLocationCoordinates(config: AdminResourceConfig): boolean {
+  const names = new Set(config.fields.map((field) => field.name));
+  return (names.has("longitude") && names.has("latitude"))
+    || (names.has("coverage_center_longitude") && names.has("coverage_center_latitude"));
+}
+
+/** 从不同资源的坐标命名中提取当前定位摘要。 */
+function locationValue(values: FormValues): { address: string; longitude: string; latitude: string } {
+  return {
+    address: String(values.address ?? ""),
+    longitude: String(values.longitude || values.coverage_center_longitude || values.display_longitude || ""),
+    latitude: String(values.latitude || values.coverage_center_latitude || values.display_latitude || ""),
+  };
+}
+
+/** 只回填当前资源真实存在的地点字段，并让渠道演示坐标与真实坐标保持一致。 */
+function applyLocation(config: AdminResourceConfig, values: FormValues, location: AmapLocationSelection): FormValues {
+  const names = new Set(config.fields.map((field) => field.name));
+  const next: FormValues = { ...values };
+  const candidates: Record<string, string> = {
+    address: location.address,
+    province: location.province,
+    city: location.city,
+    district: location.district,
+    amap_adcode: location.amapAdcode,
+    longitude: location.longitude,
+    latitude: location.latitude,
+    display_longitude: location.longitude,
+    display_latitude: location.latitude,
+    coverage_center_longitude: location.longitude,
+    coverage_center_latitude: location.latitude,
+  };
+  Object.entries(candidates).forEach(([name, value]) => {
+    if (names.has(name)) next[name] = value;
+  });
+  return next;
+}
 
 /** 把服务端时间转换为 datetime-local 使用的本地文本。 */
 function localDateTimeValue(value: unknown): string {
@@ -125,7 +166,7 @@ function ReferenceField({ field, value, onChange }: { field: AdminFieldConfig; v
 }
 
 /** 渲染一个完整业务字段，统一标签、帮助文案和必填语义。 */
-function AdminDataField({ field, value, onChange }: { field: AdminFieldConfig; value: FormValue; onChange: (value: FormValue) => void }) {
+function AdminDataField({ field, value, readOnly = false, onChange }: { field: AdminFieldConfig; value: FormValue; readOnly?: boolean; onChange: (value: FormValue) => void }) {
   if (field.kind === "product-list") {
     return <AdminProductItemsEditor value={Array.isArray(value) ? value : []} onChange={onChange} showImage />;
   }
@@ -142,7 +183,7 @@ function AdminDataField({ field, value, onChange }: { field: AdminFieldConfig; v
     control = <ReferenceField field={field} value={textValue} onChange={onChange} />;
   } else {
     const inputType = field.kind === "datetime" ? "datetime-local" : field.kind;
-    control = <input type={inputType} value={textValue} onChange={(event) => onChange(event.target.value)} required={field.required} step={field.step} min={field.min} max={field.max} maxLength={field.maxLength} />;
+    control = <input type={inputType} value={textValue} onChange={(event) => onChange(event.target.value)} required={field.required} readOnly={readOnly} step={field.step} min={field.min} max={field.max} maxLength={field.maxLength} />;
   }
   return <label className={field.wide ? "field-wide" : undefined}><span>{field.label}{field.required ? <b aria-hidden="true">*</b> : null}</span>{control}{field.help ? <small>{field.help}</small> : null}</label>;
 }
@@ -153,6 +194,7 @@ export function AdminDataFormDialog({ config, item, hiddenFields = [], onCancel,
   const [values, setValues] = useState<FormValues>(() => initialFormValues(config, item));
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const locationEnabled = hasLocationCoordinates(config);
 
   useEffect(() => { const dialog = dialogRef.current; dialog?.showModal(); return () => { if (dialog?.open) dialog.close(); }; }, []);
 
@@ -162,6 +204,8 @@ export function AdminDataFormDialog({ config, item, hiddenFields = [], onCancel,
     setSubmitting(true);
     setError(null);
     try {
+      const missingCoordinate = config.fields.find((field) => field.required && locationCoordinateFields.has(field.name) && !String(values[field.name] ?? "").trim());
+      if (missingCoordinate) throw new Error("请先通过高德地点搜索选择位置，再保存记录");
       await onSaved(payloadFromValues(config, values));
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : "保存失败，请核对字段后重试");
@@ -173,7 +217,10 @@ export function AdminDataFormDialog({ config, item, hiddenFields = [], onCancel,
     <dialog ref={dialogRef} className="organization-edit-dialog admin-data-dialog" aria-labelledby="admin-data-dialog-title" onCancel={(event) => { event.preventDefault(); if (!submitting) onCancel(); }}>
       <form onSubmit={submit}>
         <header><div><span>{item ? "编辑完整记录" : "新增完整记录"}</span><h2 id="admin-data-dialog-title">{item ? `编辑${config.singular}` : `添加${config.singular}`}</h2><p>{config.description}</p></div><button type="button" onClick={onCancel} disabled={submitting} aria-label="关闭表单"><X size={18} /></button></header>
-        <div className="organization-edit-body"><section><h3>全部业务字段</h3><div className="organization-edit-grid">{config.fields.filter((field) => !hiddenFields.includes(field.name)).map((field) => <AdminDataField key={field.name} field={field} value={values[field.name]} onChange={(value) => setValues((current) => ({ ...current, [field.name]: value }))} />)}</div></section></div>
+        <div className="organization-edit-body"><section><h3>全部业务字段</h3><div className="organization-edit-grid">
+          {locationEnabled ? <AmapLocationSearch queryHint={String(values.name || values.display_name || values.address || values.city || "")} value={locationValue(values)} disabled={submitting} onSelect={(location) => setValues((current) => applyLocation(config, current, location))} /> : null}
+          {config.fields.filter((field) => !hiddenFields.includes(field.name)).map((field) => <AdminDataField key={field.name} field={field} value={values[field.name]} readOnly={locationCoordinateFields.has(field.name)} onChange={(value) => setValues((current) => ({ ...current, [field.name]: value }))} />)}
+        </div></section></div>
         {error ? <p className="organization-dialog-error" role="alert"><CircleAlert size={16} />{error}</p> : null}
         <footer><button type="button" className="organization-dialog-cancel" onClick={onCancel} disabled={submitting}>取消</button><button className="organization-dialog-save" disabled={submitting}><Save size={16} />{submitting ? "正在保存…" : item ? "保存修改" : `添加${config.singular}`}</button></footer>
       </form>

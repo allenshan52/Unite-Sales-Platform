@@ -2,7 +2,7 @@
 
 /**
  * 销售地图仪表盘主页面：组合 React、GSAP、AMap 点位地图与省级成交热力组件。
- * 首页右侧当前开放五种业务地图；同行市场版图实现保留但暂不开放主页面入口。
+ * 首页主导航只保留全国单位地图与数据洞察；同行市场版图实现保留但暂不开放入口。
  */
 import {
   useEffect,
@@ -17,7 +17,6 @@ import { gsap } from "gsap";
 import { useGSAP } from "@gsap/react";
 import { AccessLoginPanel } from "@/components/access-login-panel";
 import { AdminOrganizationMap } from "@/components/admin-organization-map";
-import { HomeOrganizationHeatmap } from "@/components/home-organization-heatmap";
 import { apiFetch, queryString, type ChannelPartnerMapPoint, type CurrentUser, type FilterOptions, type MapPoint, type SalesOfficeLocation } from "@/lib/api";
 
 gsap.registerPlugin(useGSAP);
@@ -25,11 +24,11 @@ gsap.registerPlugin(useGSAP);
 const HomeCompetitorMarketMap = dynamic(() => import("@/components/home-competitor-market-map").then((module) => module.HomeCompetitorMarketMap), { loading: LazyPanelLoading });
 const HomeDataInsights = dynamic(() => import("@/components/home-data-insights").then((module) => module.HomeDataInsights), { loading: LazyPanelLoading });
 const HomeGroupNetworkMap = dynamic(() => import("@/components/home-group-network-map").then((module) => module.HomeGroupNetworkMap), { loading: LazyPanelLoading });
-const HomeOrganizationDatabase = dynamic(() => import("@/components/home-organization-database").then((module) => module.HomeOrganizationDatabase), { loading: LazyPanelLoading });
+const HomeOrganizationHeatmap = dynamic(() => import("@/components/home-organization-heatmap").then((module) => module.HomeOrganizationHeatmap), { loading: LazyPanelLoading });
 const HomeSalespersonCoverageMap = dynamic(() => import("@/components/home-salesperson-coverage-map").then((module) => module.HomeSalespersonCoverageMap), { loading: LazyPanelLoading });
 const HomeTypicalCaseMap = dynamic(() => import("@/components/home-typical-case-map").then((module) => module.HomeTypicalCaseMap), { loading: LazyPanelLoading });
 
-type Screen = "map" | "data" | "test";
+type Screen = "map" | "data";
 type UnitMapView = "points" | "heat" | "groups" | "competitors" | "salespeople" | "cases";
 
 /** 临时隐藏同行市场版图入口；改为 true 即可恢复原按钮和完整视图。 */
@@ -135,7 +134,7 @@ function Icon({ name, size = 16 }: { name: string; size?: number }) {
 }
 
 /**
- * 应用根页面组件：管理页面、两种单位地图和数据洞察状态，并用 GSAP 编排视图切换动效。
+ * 应用根页面组件：管理地图和数据洞察状态，并用 GSAP 编排视图切换动效。
  * 点位与热力数据分别复用现有公开 API，右侧标签只负责切换呈现方式。
  */
 export default function HomePage() {
@@ -154,21 +153,16 @@ export default function HomePage() {
     return () => controller.abort();
   }, []);
 
-  /** 撤销服务端会话后卸载全部业务组件，防止共享电脑继续显示缓存数据。 */
-  async function logout() {
-    await apiFetch<void>("/auth/logout", { method: "POST" });
-    setCurrentUser(null);
-  }
-
   if (checkingSession) return <main className="admin-loading">正在确认访问权限…</main>;
   if (!currentUser) return <AccessLoginPanel audience="site" onLoggedIn={setCurrentUser} />;
-  return <Home currentUser={currentUser} onLogout={logout} />;
+  return <Home currentUser={currentUser} onLoggedOut={() => setCurrentUser(null)} />;
 }
 
 /** 已授权主站内容：只有外层会话确认成功后才挂载并请求业务数据。 */
-function Home({ currentUser, onLogout }: { currentUser: CurrentUser; onLogout: () => Promise<void> }) {
+function Home({ currentUser, onLoggedOut }: { currentUser: CurrentUser; onLoggedOut: () => void }) {
   const [screen, setScreen] = useState<Screen>("map"),
     [unitMapView, setUnitMapView] = useState<UnitMapView>("points"),
+    [heatmapVisited, setHeatmapVisited] = useState(false),
     [universityPoints, setUniversityPoints] = useState<MapPoint[]>([]),
     [mapFilterOptions, setMapFilterOptions] = useState<FilterOptions | null>(null),
     [unitMapFilters, setUnitMapFilters] = useState<UnitMapFilters>(emptyUnitMapFilters),
@@ -180,7 +174,9 @@ function Home({ currentUser, onLogout }: { currentUser: CurrentUser; onLogout: (
     [salesOfficeRequestError, setSalesOfficeRequestError] = useState<string | null>(null),
     [channelPartnerLocations, setChannelPartnerLocations] = useState<ChannelPartnerMapPoint[] | null>(null),
     [channelPartnerLoading, setChannelPartnerLoading] = useState(true),
-    [channelPartnerRequestError, setChannelPartnerRequestError] = useState<string | null>(null);
+    [channelPartnerRequestError, setChannelPartnerRequestError] = useState<string | null>(null),
+    [loggingOut, setLoggingOut] = useState(false),
+    [logoutError, setLogoutError] = useState<string | null>(null);
   const root = useRef<HTMLElement>(null);
   useGSAP(
     () => {
@@ -309,10 +305,25 @@ function Home({ currentUser, onLogout }: { currentUser: CurrentUser; onLogout: (
   /** 切换地图模式时只初始化尚未成功读取的辅助点位，成交热力数据由独立组件按需加载。 */
   function selectUnitMapView(view: UnitMapView) {
     if (view === "heat") {
+      setHeatmapVisited(true);
       if (salesOfficeLocations === null) { setSalesOfficeLoading(true); setSalesOfficeRequestError(null); }
       if (channelPartnerLocations === null) { setChannelPartnerLoading(true); setChannelPartnerRequestError(null); }
     }
     setUnitMapView(view);
+  }
+
+  /** 在按钮所属视图内维护退出反馈；失败时保留当前会话和全部地图状态供用户重试。 */
+  async function handleLogout() {
+    setLoggingOut(true);
+    setLogoutError(null);
+    try {
+      await apiFetch<void>("/auth/logout", { method: "POST" });
+      onLoggedOut();
+    } catch (requestError) {
+      setLogoutError(requestError instanceof Error ? requestError.message : "退出失败，请稍后重试");
+    } finally {
+      setLoggingOut(false);
+    }
   }
 
   const provinceOptions = useMemo(
@@ -359,17 +370,6 @@ function Home({ currentUser, onLogout }: { currentUser: CurrentUser; onLogout: (
             <Icon name="chart" size={16} />
             数据洞察
           </button>
-          <button
-            id="screen-tab-test"
-            className={screen === "test" ? "active" : ""}
-            onClick={() => setScreen("test")}
-            role="tab"
-            aria-selected={screen === "test"}
-            aria-controls="screen-panel-test"
-          >
-            <Icon name="database" size={16} />
-            单位数据库
-          </button>
         </nav>
         <div className="topbar-meta">
           <a className="admin-entry-link" href="/admin/organizations">
@@ -377,9 +377,10 @@ function Home({ currentUser, onLogout }: { currentUser: CurrentUser; onLogout: (
             <Icon name="arrow" size={14} />
           </a>
           <span>{currentUser.username}</span>
-          <button className="site-logout-button" type="button" onClick={() => void onLogout()}>退出</button>
+          <button className="site-logout-button" type="button" onClick={() => void handleLogout()} disabled={loggingOut}>{loggingOut ? "正在退出…" : "退出"}</button>
         </div>
       </header>
+      {logoutError ? <p className="site-session-error" role="alert">{logoutError}</p> : null}
       <section
         id="screen-panel-map"
         className={`workspace-panel map-workspace ${screen === "map" ? "is-active" : ""}`}
@@ -452,7 +453,7 @@ function Home({ currentUser, onLogout }: { currentUser: CurrentUser; onLogout: (
                 </div>
               </>
             ) : null}
-            <div className={`unit-map-mode ${unitMapView === "heat" ? "" : "is-hidden"}`}>
+            {heatmapVisited ? <div className={`unit-map-mode ${unitMapView === "heat" ? "" : "is-hidden"}`}>
               <HomeOrganizationHeatmap
                 active={unitMapView === "heat"}
                 salesOffices={salesOfficeLocations ?? []}
@@ -462,7 +463,7 @@ function Home({ currentUser, onLogout }: { currentUser: CurrentUser; onLogout: (
                 channelPartnersLoading={channelPartnerLoading}
                 channelPartnersError={channelPartnerRequestError}
               />
-            </div>
+            </div> : null}
             {unitMapView === "groups" ? <HomeGroupNetworkMap /> : null}
             {unitMapView === "competitors" ? <HomeCompetitorMarketMap /> : null}
             {unitMapView === "salespeople" ? <HomeSalespersonCoverageMap /> : null}
@@ -477,6 +478,14 @@ function Home({ currentUser, onLogout }: { currentUser: CurrentUser; onLogout: (
                   <Icon name="focus" size={18} />
                   <span><b>全国成交热力地图</b><small>成交金额与采购意向</small></span>
                 </button>
+                <button className={unitMapView === "cases" ? "selected" : ""} type="button" role="tab" aria-selected={unitMapView === "cases"} onClick={() => selectUnitMapView("cases")}>
+                  <Icon name="database" size={18} />
+                  <span><b>典型案例地图</b><small>一省一案 · 标杆复盘</small></span>
+                </button>
+                <button className={unitMapView === "salespeople" ? "selected" : ""} type="button" role="tab" aria-selected={unitMapView === "salespeople"} onClick={() => selectUnitMapView("salespeople")}>
+                  <Icon name="people" size={18} />
+                  <span><b>销售覆盖与人效</b><small>城市范围、活动与业绩</small></span>
+                </button>
                 <button className={unitMapView === "groups" ? "selected" : ""} type="button" role="tab" aria-selected={unitMapView === "groups"} onClick={() => selectUnitMapView("groups")}>
                   <Icon name="link" size={18} />
                   <span><b>客户关系网络</b><small>总部与集团分支关系</small></span>
@@ -487,14 +496,6 @@ function Home({ currentUser, onLogout }: { currentUser: CurrentUser; onLogout: (
                     <span><b>同行市场版图</b><small>据点、成交与强势区域</small></span>
                   </button>
                 ) : null}
-                <button className={unitMapView === "salespeople" ? "selected" : ""} type="button" role="tab" aria-selected={unitMapView === "salespeople"} onClick={() => selectUnitMapView("salespeople")}>
-                  <Icon name="people" size={18} />
-                  <span><b>销售覆盖与人效</b><small>城市范围、活动与业绩</small></span>
-                </button>
-                <button className={unitMapView === "cases" ? "selected" : ""} type="button" role="tab" aria-selected={unitMapView === "cases"} onClick={() => selectUnitMapView("cases")}>
-                  <Icon name="database" size={18} />
-                  <span><b>典型案例地图</b><small>一省一案 · 标杆复盘</small></span>
-                </button>
               </div>
             </aside>
           </div>
@@ -510,15 +511,6 @@ function Home({ currentUser, onLogout }: { currentUser: CurrentUser; onLogout: (
             <span>{unitMapView === "points" ? "未定位记录不会显示在地图中" : unitMapView === "heat" ? "点击省份查看类型与客户状态构成" : unitMapView === "groups" ? "点击总部展开关系；关闭、Esc 或返回全国集团可重置" : unitMapView === "competitors" ? "点击据点、成交单位或区域打开对应详情" : unitMapView === "salespeople" ? "点击销售 Pin 查看市、省、大区或全国覆盖，选择两人后可对比" : "点击省份或使用下拉框浏览案例复盘"}</span>
           </div>
         </div>
-      </section>
-      <section
-        id="screen-panel-test"
-        className={`workspace-panel database-workspace ${screen === "test" ? "is-active" : ""}`}
-        role="tabpanel"
-        aria-labelledby="screen-tab-test"
-        aria-hidden={screen !== "test"}
-      >
-        {screen === "test" && <HomeOrganizationDatabase />}
       </section>
       <section
         id="screen-panel-data"

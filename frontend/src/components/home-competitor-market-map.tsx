@@ -84,7 +84,7 @@ function CompetitorDealCard({ deal }: { deal: CompetitorDeal }) {
               <img className="competitor-product-image" src={firstProduct.product_image_url} alt={`${productLabel}产品图片`} width="112" height="78" />
             </>
           : <div className="competitor-product-image is-empty" role="img" aria-label="暂无产品图片">暂无产品图片</div>}
-        <div><small>项目名称</small><h4>{deal.project_name}</h4><span>{deal.deal_type}</span></div>
+        <div><small>项目名称</small><h4>{deal.project_name}</h4><span>{deal.deal_type || "成交类型待补"}</span></div>
       </div>
       {products.map((product, index) => <dl className="competitor-deal-fields" key={product.id}>
         <div><dt>产品 {index + 1}</dt><dd>{product.product_name}</dd></div><div><dt>品牌</dt><dd>{product.brand || "未记录"}</dd></div>
@@ -97,11 +97,11 @@ function CompetitorDealCard({ deal }: { deal: CompetitorDeal }) {
         <div><dt>供应商</dt><dd>{deal.supplier_name || "供应商待补"}</dd></div>
         <div><dt>项目总价</dt><dd className="is-amount">{currencyFormatter.format(Number(deal.amount))}</dd></div>
         <div><dt>中标时间</dt><dd>{formatDealDate(deal.signed_at)}</dd></div>
-        <div><dt>成交类型</dt><dd>{deal.deal_type}</dd></div>
+        <div><dt>成交类型</dt><dd>{deal.deal_type || "未记录"}</dd></div>
       </dl>
       <div className="competitor-deal-source">
-        <span>来源：{deal.source_type}</span><span>置信度 {deal.confidence}</span>
-        <p>{deal.source_reference}</p>
+        <span>来源：{deal.source_type || "未记录"}</span><span>置信度 {deal.confidence || "未记录"}</span>
+        <p>{deal.source_reference || "来源说明待补充"}</p>
         {deal.source_url ? <a href={deal.source_url} target="_blank" rel="noreferrer">查看来源</a> : <small>暂无来源链接</small>}
         {deal.notes ? <p>备注：{deal.notes}</p> : null}
       </div>
@@ -400,6 +400,7 @@ export function HomeCompetitorMarketMap() {
       markers.push(marker);
     });
     detail.customers.forEach((customer) => {
+      if (customer.longitude == null || customer.latitude == null) return;
       const marker = new runtime.AMap.Marker({ position: [customer.longitude, customer.latitude], anchor: "center", zIndex: 115, content: `<div class="competitor-customer-marker" style="--competitor-color:${detail.color}"><span>${escapeHtml(customer.customer_level.slice(0, 1))}</span><b>${escapeHtml(customer.name)}</b></div>` });
       marker.on("click", () => { setSelectedUniteCustomer(null); setActiveTab("customers"); setSelectedId(customer.id); });
       markers.push(marker);

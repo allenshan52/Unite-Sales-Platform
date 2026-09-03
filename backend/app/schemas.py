@@ -70,6 +70,19 @@ class SiteInput(BaseModel):
     is_primary: bool = True
 
 
+class AmapLocationSearchRead(BaseModel):
+    """公司地点搜索候选；坐标保持高德 GCJ-02，供后台表单直接回填。"""
+
+    name: str
+    address: str
+    province: str
+    city: str
+    district: str
+    amap_adcode: str
+    longitude: str
+    latitude: str
+
+
 class OrganizationCreate(BaseModel):
     """正式入库输入；高校和研究院在服务端强制要求至少一项纳入证据。"""
 
@@ -163,11 +176,22 @@ class SalesProjectUpdate(BaseModel):
     quantity: Decimal | None = Field(default=None, gt=0, max_digits=14, decimal_places=3)
     supplier_name: str | None = Field(default=None, max_length=255)
     specification_model: str | None = Field(default=None, max_length=255)
+    location_name: str | None = Field(default=None, max_length=255)
     province: str | None = Field(default=None, max_length=60)
     city: str | None = Field(default=None, max_length=60)
     signed_at: date | None = None
     project_detail: str | None = Field(default=None, max_length=5000)
     products: list[SalesProjectProductUpdate] = Field(default_factory=list, max_length=100)
+
+    @model_validator(mode="after")
+    def validate_location_pair(self) -> "SalesProjectUpdate":
+        """要求订单省市成对出现，使单位编辑入口与成交订单入口保持相同数据约束。"""
+
+        if bool(self.province) != bool(self.city):
+            raise ValueError("成交单位所在地的省份和城市必须同时填写")
+        if self.location_name and not self.province:
+            raise ValueError("填写所在地名称时必须同时填写省份和城市")
+        return self
 
 
 class OrganizationUpdate(BaseModel):
@@ -532,13 +556,13 @@ class CompetitorDealProductRead(BaseModel):
 
 
 class CompetitorDealRead(BaseModel):
-    """同行成交记录公开产品、数量、供应商字段，金额与来源保持逐笔可核验。"""
+    """同行成交记录公开产品与可选来源字段，缺失情报保持为空。"""
 
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
     project_name: str
-    deal_type: str
+    deal_type: str | None
     # 兼容字段取第一条产品；新消费者应读取 products。
     product_name: str | None = None
     specification_model: str | None = None
@@ -548,25 +572,25 @@ class CompetitorDealRead(BaseModel):
     supplier_name: str | None = None
     amount: Decimal
     signed_at: date | None
-    source_type: IntelligenceSourceType
-    source_reference: str
+    source_type: IntelligenceSourceType | None
+    source_reference: str | None
     source_url: str | None
-    confidence: IntelligenceConfidence
+    confidence: IntelligenceConfidence | None
     notes: str | None
     products: list[CompetitorDealProductRead] = Field(default_factory=list)
 
 
 class CompetitorCustomerRead(BaseModel):
-    """同行成交单位地图节点，并标明是否已经确认关联正式单位。"""
+    """同行成交单位节点；待补地址记录不返回地图坐标，但仍保留订单和关联。"""
 
     id: UUID
     name: str
     customer_level: CompetitorCustomerLevel
-    address: str
+    address: str | None
     province: str
     city: str
-    longitude: float
-    latitude: float
+    longitude: float | None
+    latitude: float | None
     source_type: IntelligenceSourceType
     source_reference: str
     source_url: str | None
@@ -918,7 +942,8 @@ class SalespersonActivitySummaryRead(BaseModel):
 class SalespersonPerformanceRead(BaseModel):
     """销售人员在同一时间口径下的活动、成交与储备项目汇总。"""
 
-    period_months: int
+    period_months: int | None
+    period_year: int | None = None
     activities: SalespersonActivitySummaryRead
     actual_sales_amount: Decimal = Field(ge=0)
     pipeline_amount: Decimal = Field(ge=0)

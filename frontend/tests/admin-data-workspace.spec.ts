@@ -1,6 +1,8 @@
-/** 数据后台浏览器验收：覆盖八页导航、分类分页、完整字段 CRUD 和响应式布局。 */
+/** 数据后台浏览器验收：覆盖导航、分页、完整字段 CRUD、订单归属转换和响应式布局。 */
 
 import { expect, test, type Page, type Route } from "@playwright/test";
+
+import { installFakeAmap } from "./fake-amap";
 
 const baseUrl = process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3100";
 const adminUrl = `${baseUrl}/admin/organizations`;
@@ -29,13 +31,37 @@ const resourceItems: Record<string, RecordItem[]> = {
   competitor_customers: [{ id: "customer-1", competitor_id: "competitor-1", name: "演示成交单位", customer_level: "一级", address: "苏州市演示路 9 号", province: "江苏省", city: "苏州市", longitude: 120.58, latitude: 31.3, source_type: "一线反馈", source_reference: "虚构一线反馈", source_url: null, confidence: "中", first_observed_at: "2026-06-01", last_verified_at: "2026-08-01", notes: "虚构单位" }],
   competitor_deals: [{ id: "deal-1", competitor_customer_id: "customer-1", project_name: "演示成交项目", deal_type: "设备", product_name: "台式气相色谱仪", specification_model: "GC-DEMO-01", product_image_url: "/cases/jiangsu-lab.webp", unit_price: "130000.25", quantity: "2.000", supplier_name: "虚构仪器供应商", amount: "260000.50", signed_at: "2026-07-15", source_type: "公开信息", source_reference: "虚构合同公告", source_url: null, confidence: "高", notes: null }],
   competitor_links: [{ id: "link-1", competitor_customer_id: "customer-1", organization_id: "org-1", organization_id_label: "演示目标单位", match_status: "已确认", match_method: "名称和地址", match_confidence: "高", matched_by: "admin", matched_at: "2026-08-01T09:00:00+08:00", notes: null }],
-  competitor_strength_regions: [{ id: "region-1", competitor_id: "competitor-1", region_level: "省", province: "北京市", city: null, strength_level: "强", source_type: "公开信息", source_reference: "虚构区域资料", source_url: null, confidence: "高", basis: "虚构测试依据" }],
 };
 
 // 新订单契约把旧单产品字段迁移为 products 数组，保留两条明细覆盖增删编辑与列表摘要。
 resourceItems.competitor_deals[0].products = [
   { id: "deal-product-1", product_name: "台式气相色谱仪", brand: "虚构品牌甲", specification_model: "GC-DEMO-01", product_image_url: "/cases/jiangsu-lab.webp", unit_price: "130000.25", quantity: "2.000", line_total: "260000.50" },
 ];
+
+/** 组装成交订单抽屉的同行详情，模拟后端已按账号范围裁剪的响应。 */
+function adminCompetitorDetail(competitorId: string) {
+  const competitor = resourceItems.competitors.find((item) => item.id === competitorId)!;
+  const sites = resourceItems.competitor_sites.filter((item) => item.competitor_id === competitorId);
+  const customers = resourceItems.competitor_customers.filter((item) => item.competitor_id === competitorId).map((customer) => {
+    const deals = resourceItems.competitor_deals.filter((item) => item.competitor_customer_id === customer.id);
+    const link = resourceItems.competitor_links.find((item) => item.competitor_customer_id === customer.id);
+    return { ...customer, linked_organization_id: link?.organization_id ?? null, linked_organization_name: link ? "演示目标单位" : null, match_status: link?.match_status ?? null, match_confidence: link?.match_confidence ?? null, deals };
+  });
+  const deals = customers.flatMap((customer) => customer.deals);
+  return {
+    ...competitor,
+    summary: {
+      site_count: sites.length,
+      customer_count: customers.length,
+      linked_customer_count: customers.filter((customer) => customer.match_status === "已确认").length,
+      deal_count: deals.length,
+      total_amount: deals.reduce((total, item) => total + Number(item.amount ?? 0), 0).toFixed(2),
+    },
+    sites,
+    customers,
+    scope_limited: false,
+  };
+}
 
 const salespersonProfiles: Record<string, Record<string, unknown>> = {
   "sales-1": {
@@ -89,19 +115,35 @@ async function installAdminApi(page: Page, currentUser: Record<string, unknown> 
 
     if (path === "/auth/me") return json(currentUser);
     if (path === "/auth/logout" && request.method() === "POST") return route.fulfill({ status: 204, body: "" });
+    if (path === "/admin-location-search") {
+      if (url.searchParams.get("keyword")?.includes("不存在")) return json([]);
+      return json([{
+        name: "高德演示地点", address: "上海市浦东新区演示大道 18 号", province: "上海市",
+        city: "上海市", district: "浦东新区", amap_adcode: "310115",
+        longitude: "121.506377", latitude: "31.245105",
+      }]);
+    }
     if (path === "/organizations/filters") return json({ organization_types: [], customer_statuses: [], review_statuses: [], provinces: [], cities: [], districts: [], salespeople: [{ id: "sales-1", employee_code: "XS001", display_name: "演示销售", is_active: true }] });
     if (path === "/organizations") return json({ items: [], total: 0, page: 1, page_size: 10 });
     if (path === "/organizations/org-1") return json({ id: "org-1", name: "演示目标单位", opportunities: [{ id: "opportunity-1", title: "演示商机", stage: "方案交流", estimated_amount: "300000.00", ai_summary: null, next_action: null, next_action_at: null }] });
     if (path === "/admin-data/organizations/options") return json([{ value: "org-1", label: "演示目标单位" }]);
+    if (path === "/admin-data/competitors/options") return json([{ value: "competitor-1", label: "演示同行" }]);
     if (path === "/admin-data/competitor_customers/options") return json([{ value: "customer-1", label: "演示成交单位" }]);
     if (path === "/admin-data/salespeople/options") return json([{ value: "sales-1", label: "演示销售" }]);
     if (path === "/admin-deals/options") return json({ competitors: [{ value: "competitor-1", label: "演示同行" }], suppliers: ["虚构仪器供应商"], years: [2026] });
     if (path === "/admin-deals") {
       const deal = resourceItems.competitor_deals[0];
       if (!deal) return json({ items: [], total: 0, page: 1, page_size: 20 });
-      return json({ items: [{ id: deal.id, seller_type: "competitor", seller_id: "competitor-1", customer_id: deal.competitor_customer_id, seller_name: "演示同行", customer_name: "演示成交单位", project_name: deal.project_name, total_amount: deal.amount, supplier_name: deal.supplier_name, opportunity_id: null, salesperson_id: null, salesperson_name: null, signed_at: deal.signed_at, province: "江苏省", city: "苏州市", deal_type: deal.deal_type, source_type: deal.source_type, source_reference: deal.source_reference, source_url: deal.source_url, confidence: deal.confidence, notes: deal.notes, products: deal.products }], total: 1, page: 1, page_size: 20 });
+      return json({ items: [{ id: deal.id, seller_type: "competitor", seller_id: "competitor-1", customer_id: deal.competitor_customer_id, organization_id: "org-1", seller_name: "演示同行", customer_name: "演示成交单位", project_name: deal.project_name, total_amount: deal.amount, supplier_name: deal.supplier_name, opportunity_id: null, salesperson_id: null, salesperson_name: null, signed_at: deal.signed_at, location_name: "苏州演示园区", province: "江苏省", city: "苏州市", deal_type: deal.deal_type, source_type: deal.source_type, source_reference: deal.source_reference, source_url: deal.source_url, confidence: deal.confidence, notes: deal.notes, products: deal.products }], total: 1, page: 1, page_size: 20 });
     }
+    if (path === "/admin-deals/competitor" && request.method() === "POST") return json({ id: "competitor-deal-created" }, 201);
     if (path === "/admin-deals/unite" && request.method() === "POST") return json({ id: "unite-deal-created" }, 201);
+    if (path === "/admin-deals/competitor/deal-1/convert-to-unite" && request.method() === "PUT") return json({ id: "unite-deal-converted" });
+    if (path === "/admin-deals/competitor/deal-1" && request.method() === "PUT") {
+      const payload = request.postDataJSON() as Record<string, unknown>;
+      Object.assign(resourceItems.competitor_deals[0], { project_name: payload.project_name, products: payload.products });
+      return json({ id: "deal-1" });
+    }
 
     if (path === "/admin-typical-cases/project-options") return json([]);
     if (path === "/admin-typical-cases" && request.method() === "GET") return json(typicalCaseOverview());
@@ -116,6 +158,11 @@ async function installAdminApi(page: Page, currentUser: Record<string, unknown> 
       return json(typicalCaseDetail, 201);
     }
 
+    if (path === "/admin-competitors/competitor-1" && request.method() === "GET") return json(adminCompetitorDetail("competitor-1"));
+    if (path === "/admin-competitors/competitor-1" && request.method() === "PUT") {
+      Object.assign(resourceItems.competitors[0], request.postDataJSON());
+      return json(adminCompetitorDetail("competitor-1"));
+    }
     if (path === "/admin-competitors" && request.method() === "GET") {
       const items = resourceItems.competitors.map((competitor) => {
         const sites = resourceItems.competitor_sites.filter((item) => item.competitor_id === competitor.id);
@@ -123,14 +170,12 @@ async function installAdminApi(page: Page, currentUser: Record<string, unknown> 
         const customerIds = new Set(customers.map((item) => item.id));
         const deals = resourceItems.competitor_deals.filter((item) => customerIds.has(String(item.competitor_customer_id)));
         const links = resourceItems.competitor_links.filter((item) => customerIds.has(String(item.competitor_customer_id)));
-        const regions = resourceItems.competitor_strength_regions.filter((item) => item.competitor_id === competitor.id);
         const primarySite = sites.find((item) => item.is_primary);
-        return { ...competitor, primary_site_name: primarySite?.name ?? null, primary_site_city: primarySite?.city ?? null, site_count: sites.length, customer_count: customers.length, linked_customer_count: links.filter((item) => item.match_status === "已确认").length, pending_link_count: links.filter((item) => item.match_status === "待确认").length, deal_count: deals.length, total_amount: deals.reduce((total, item) => total + Number(item.amount ?? 0), 0).toFixed(2), strength_region_count: regions.length, strength_regions: regions.map((item) => item.city ? `${item.province}·${item.city}` : String(item.province)).slice(0, 3) };
+        return { ...competitor, primary_site_name: primarySite?.name ?? null, primary_site_city: primarySite?.city ?? null, site_count: sites.length, customer_count: customers.length, linked_customer_count: links.filter((item) => item.match_status === "已确认").length, pending_link_count: links.filter((item) => item.match_status === "待确认").length, deal_count: deals.length, total_amount: deals.reduce((total, item) => total + Number(item.amount ?? 0), 0).toFixed(2) };
       });
       return json(paginate(items, url));
     }
 
-    if (path === "/public/competitors/competitor-1") return json({ id: "competitor-1", name: "演示同行", website_url: "https://example.com", color: "#25846F", description: "虚构同行", summary: { site_count: 1, customer_count: 1, linked_customer_count: 1, deal_count: 1, total_amount: "260000.50", strong_region_count: 1 }, sites: [], customers: [], strength_regions: [{ id: "computed-region-1", region_level: "省", province: "江苏省", city: null, strength_level: "强", source_type: "公开信息", source_reference: "自动聚合", source_url: null, confidence: "高", basis: "计算结果", score: "88.50", site_count: 1, customer_count: 1, total_amount: "260000.50" }] });
 
     const customerGroupMatch = path.match(/^\/admin-customer-groups(?:\/([^/]+))?$/);
     if (customerGroupMatch) {
@@ -245,6 +290,67 @@ async function openAdmin(page: Page): Promise<void> {
   await page.goto(adminUrl, { waitUntil: "networkidle" });
   await expect(page.getByRole("heading", { name: "数据后台" })).toBeVisible();
 }
+
+test("高德地点搜索自动回填目标单位、集团单位和同行据点", async ({ page }) => {
+  await installFakeAmap(page);
+  await openAdmin(page);
+
+  await page.getByRole("button", { name: "添加单位" }).click();
+  const organizationDialog = page.getByRole("dialog", { name: "添加单位" });
+  await organizationDialog.getByLabel("单位名称 *").fill("新增定位单位");
+  await organizationDialog.getByLabel("高德地点搜索").fill("上海高德演示地点");
+  await organizationDialog.getByRole("button", { name: "搜索位置" }).click();
+  await organizationDialog.getByRole("button", { name: /高德演示地点/ }).click();
+  await expect(organizationDialog.getByLabel(/省份/)).toHaveValue("上海市");
+  await expect(organizationDialog.getByLabel(/城市/)).toHaveValue("上海市");
+  await expect(organizationDialog.getByLabel("区县")).toHaveValue("浦东新区");
+  await expect(organizationDialog.getByLabel("高德区域编码")).toHaveValue("310115");
+  await expect(organizationDialog.getByLabel("经度（自动）")).toHaveValue("121.506377");
+  await expect(organizationDialog.getByLabel("纬度（自动）")).toHaveValue("31.245105");
+  await expect(organizationDialog.getByText(/已定位：上海市浦东新区演示大道 18 号/)).toBeVisible();
+  await organizationDialog.getByRole("button", { name: "取消添加" }).click();
+
+  await page.getByRole("tab", { name: "客户集团", exact: true }).click();
+  await page.getByRole("button", { name: "添加客户集团" }).click();
+  const groupDialog = page.getByRole("dialog", { name: "添加客户集团" });
+  const headquarters = groupDialog.locator(".customer-group-unit-record").filter({ hasText: "集团总部" });
+  await headquarters.getByLabel(/单位名称/).fill("新增集团总部");
+  await headquarters.getByLabel("高德地点搜索").fill("上海高德演示地点");
+  await headquarters.getByRole("button", { name: "搜索位置" }).click();
+  await headquarters.getByRole("button", { name: /高德演示地点/ }).click();
+  await expect(headquarters.getByLabel(/详细地址/)).toHaveValue("上海市浦东新区演示大道 18 号");
+  await expect(headquarters.getByLabel(/经度（自动）/)).toHaveAttribute("readonly", "");
+  await groupDialog.getByRole("button", { name: "关闭客户集团档案" }).click();
+
+  await page.getByRole("tab", { name: "成交订单", exact: true }).click();
+  await page.getByRole("button", { name: "查看演示同行同行公司详情" }).click();
+  await page.getByRole("dialog", { name: "演示同行" }).getByRole("button", { name: "添加据点" }).click();
+  const competitorDialog = page.getByRole("dialog", { name: "添加同行据点" });
+  await competitorDialog.getByLabel("高德地点搜索").fill("上海高德演示地点");
+  await competitorDialog.getByRole("button", { name: "搜索位置" }).click();
+  await competitorDialog.getByRole("button", { name: /高德演示地点/ }).click();
+  await expect(competitorDialog.getByLabel("地址")).toHaveValue("上海市浦东新区演示大道 18 号");
+  await expect(competitorDialog.getByLabel("省份")).toHaveValue("上海市");
+  await expect(competitorDialog.getByLabel("城市")).toHaveValue("上海市");
+  await expect(competitorDialog.getByLabel("经度")).toHaveValue("121.506377");
+  await expect(competitorDialog.getByLabel("纬度")).toHaveValue("31.245105");
+  await competitorDialog.getByRole("button", { name: "取消" }).click();
+});
+
+test("高德地点搜索对短关键词和空结果给出可恢复反馈", async ({ page }) => {
+  await installFakeAmap(page);
+  await openAdmin(page);
+  await page.getByRole("button", { name: "添加单位" }).click();
+  const dialog = page.getByRole("dialog", { name: "添加单位" });
+  await dialog.getByLabel("高德地点搜索").fill("沪");
+  await dialog.getByRole("button", { name: "搜索位置" }).click();
+  await expect(dialog.getByRole("alert")).toContainText("至少 2 个字");
+  await dialog.getByLabel("高德地点搜索").fill("不存在的演示地点");
+  await dialog.getByRole("button", { name: "搜索位置" }).click();
+  await expect(dialog.getByRole("alert")).toContainText("没有找到匹配地点");
+  await expect(dialog.locator(".amap-location-results button")).toHaveCount(0);
+  await dialog.getByRole("button", { name: "取消添加" }).click();
+});
 
 /** 验证任意账号的可见页签都在标题与返回入口之间居中，并与两侧控件保持同一行且不交叠。 */
 async function expectHeaderNavigationBetweenControls(page: Page): Promise<void> {
@@ -382,7 +488,7 @@ test("单位后台移除保存视图和最近访问并保留原子批量归档",
   expect(batchPayload).toEqual({ ids: ["org-batch"], action: "archive" });
 });
 
-test("优纳特成交项目明细可在单位后台完整修改", async ({ page }) => {
+test("单位后台仅显示订单数量且保存时不回写成交订单", async ({ page }) => {
   const captured: { patchPayload?: Record<string, unknown> } = {};
   const timestamp = "2026-08-27T08:00:00+08:00";
   const organization = {
@@ -411,38 +517,22 @@ test("优纳特成交项目明细可在单位后台完整修改", async ({ page 
 
   await page.getByRole("listitem").filter({ hasText: "成交编辑演示单位" }).getByRole("button", { name: "修改" }).click();
   const dialog = page.getByRole("dialog", { name: "修改单位档案" });
-  const order = dialog.locator(".organization-edit-record").filter({ hasText: "成交项目 1" });
-  await expect(order.getByLabel("品牌")).toHaveValue("原品牌");
-  await expect(order.getByLabel("产品规格")).toHaveValue("SPEC-A");
-  await expect(order.getByLabel("单价（元）")).toHaveValue("1250.00");
-  await expect(order.getByLabel("数量")).toHaveValue("2.000");
-  await expect(order.getByLabel("供应商")).toHaveValue("原供应商");
-  await expect(order.getByLabel("省份")).toHaveValue("江苏省");
-  await expect(order.getByLabel("城市")).toHaveValue("苏州市");
-
-  await order.getByLabel("品牌").fill("更新品牌");
-  await order.getByLabel("产品规格").fill("SPEC-B");
-  await order.getByLabel("单价（元）").fill("1300.50");
-  await order.getByLabel("数量").fill("3.5");
-  await order.getByLabel("供应商").fill("更新供应商");
-  await order.getByLabel("省份").fill("浙江省");
-  await order.getByLabel("城市").fill("杭州市");
-  await order.getByLabel("负责销售").selectOption("sales-1");
+  await expect(dialog.getByRole("heading", { name: "成交订单" })).toBeVisible();
+  await expect(dialog.getByText("当前单位共 1 笔订单；此处仅显示数量。")).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "新增成交项目" })).toHaveCount(0);
+  await expect(dialog.getByLabel("项目名称")).toHaveCount(0);
+  await dialog.getByLabel("行业").fill("更新后的单位行业");
   await dialog.getByRole("button", { name: "保存修改" }).click();
 
   await expect.poll(() => captured.patchPayload).toBeDefined();
-  const salesProjects = captured.patchPayload?.sales_projects as Array<Record<string, unknown>>;
-  expect(salesProjects[0]).toMatchObject({
-    unit_price: 1300.5, quantity: 3.5, supplier_name: "更新供应商", specification_model: "SPEC-B",
-    province: "浙江省", city: "杭州市", salesperson_id: "sales-1",
-  });
-  expect((salesProjects[0].products as Array<Record<string, unknown>>)[0]).toMatchObject({ brand: "更新品牌", specification_model: "SPEC-B" });
+  expect(captured.patchPayload).not.toHaveProperty("sales_projects");
+  expect(captured.patchPayload).toMatchObject({ industry: "更新后的单位行业" });
 });
 
-test("八个数据页统一显示分类、数量和分页布局", async ({ page }) => {
+test("七个数据页统一显示分类、数量和分页布局", async ({ page }) => {
   await openAdmin(page);
   const tabs = page.getByRole("tablist", { name: "后台数据页面" }).getByRole("tab");
-  await expect(tabs).toHaveCount(8);
+  await expect(tabs).toHaveCount(7);
   await expect(tabs.first()).toHaveAttribute("aria-selected", "true");
   const tabFrame = await page.locator(".admin-dataset-tabs").evaluate((element) => {
     const frame = element.getBoundingClientRect();
@@ -471,14 +561,6 @@ test("八个数据页统一显示分类、数量和分页布局", async ({ page 
       await expect(page.getByText("演示经销商", { exact: true })).toHaveCount(0);
     }
   }
-  await page.getByRole("tab", { name: "同行", exact: true }).click();
-  await expect(page.getByLabel("选择数据分类")).toHaveCount(0);
-  await expect(page.getByRole("navigation", { name: "同行列表分页" })).toContainText(/第 1 \/ 1 页/);
-  await expect(page.getByLabel("每页显示同行数")).toHaveValue("10");
-  await expect(page.getByRole("row").filter({ hasText: "演示同行" })).toContainText("¥260,000.5");
-  const competitorTableFits = await page.locator(".competitor-admin-table").evaluate((element) => element.scrollWidth <= element.clientWidth);
-  expect(competitorTableFits).toBe(true);
-  if (process.env.ADMIN_COMPETITOR_LIST_SCREENSHOT) await page.screenshot({ path: process.env.ADMIN_COMPETITOR_LIST_SCREENSHOT, fullPage: true });
   await page.getByRole("tab", { name: "客户集团", exact: true }).click();
   await expect(page.getByLabel("选择数据分类")).toHaveCount(0);
   await expect(page.getByRole("navigation", { name: "客户集团列表分页" })).toContainText(/第 1 \/ 1 页/);
@@ -530,6 +612,7 @@ test("典型案例保持单一省份列表并按需打开完整详情", async ({
 });
 
 test("销售人员主档集成分级覆盖范围、销售活动和二次确认删除", async ({ page }) => {
+  await installFakeAmap(page);
   await openAdmin(page);
   await page.getByRole("tab", { name: "销售", exact: true }).click();
   const initialRow = page.getByRole("row").filter({ hasText: "演示销售" });
@@ -549,8 +632,13 @@ test("销售人员主档集成分级覆盖范围、销售活动和二次确认�
   await expect(addDialog.getByRole("heading", { name: "销售活动" })).toBeVisible();
   await addDialog.getByLabel(/员工编号/).fill("XS002");
   await addDialog.getByLabel(/姓名/).fill("新增销售");
-  await addDialog.getByLabel(/Pin 经度/).fill("121.47");
-  await addDialog.getByLabel(/Pin 纬度/).fill("31.23");
+  await expect(addDialog.getByText("选择地点后仅自动填写销售 Pin 经纬度")).toBeVisible();
+  await addDialog.getByLabel("销售 Pin 所在地搜索").fill("上海高德演示地点");
+  await addDialog.getByRole("button", { name: "搜索位置" }).click();
+  await addDialog.getByRole("button", { name: /高德演示地点/ }).click();
+  await expect(addDialog.getByLabel(/Pin 经度/)).toHaveValue("121.506377");
+  await expect(addDialog.getByLabel(/Pin 纬度/)).toHaveValue("31.245105");
+  await expect(addDialog.getByLabel(/Pin 经度/)).not.toHaveAttribute("readonly", "");
   await addDialog.getByRole("button", { name: "新增覆盖范围" }).click();
   const coverageRecord = addDialog.locator(".organization-edit-record").filter({ hasText: "覆盖范围 1" });
   await coverageRecord.getByLabel("覆盖层级 1").selectOption("大区");
@@ -583,6 +671,7 @@ test("销售人员主档集成分级覆盖范围、销售活动和二次确认�
 });
 
 test("客户集团主档集成总部、分支和二次确认删除", async ({ page }) => {
+  await installFakeAmap(page);
   await openAdmin(page);
   await page.getByRole("tab", { name: "客户集团", exact: true }).click();
   const initialRow = page.getByRole("row").filter({ hasText: "演示客户集团" });
@@ -597,15 +686,15 @@ test("客户集团主档集成总部、分支和二次确认删除", async ({ pa
   await addDialog.getByLabel(/集团名称/).fill("新增客户集团");
   const headquartersRecord = addDialog.locator(".customer-group-unit-record").filter({ hasText: "集团总部" });
   await headquartersRecord.getByLabel(/单位名称/).fill("新增集团总部");
-  await headquartersRecord.getByLabel(/详细地址/).fill("上海市演示路 1 号");
-  await headquartersRecord.getByLabel(/省份/).fill("上海市");
-  await headquartersRecord.getByLabel(/城市/).fill("上海市");
+  await headquartersRecord.getByLabel("高德地点搜索").fill("上海高德演示地点");
+  await headquartersRecord.getByRole("button", { name: "搜索位置" }).click();
+  await headquartersRecord.getByRole("button", { name: /高德演示地点/ }).click();
   await addDialog.getByRole("button", { name: "新增分支单位" }).click();
   const branchRecord = addDialog.locator(".customer-group-unit-record").filter({ hasText: "分支单位 1" });
   await branchRecord.getByLabel(/单位名称/).fill("新增集团分支");
-  await branchRecord.getByLabel(/详细地址/).fill("江苏省演示路 2 号");
-  await branchRecord.getByLabel(/省份/).fill("江苏省");
-  await branchRecord.getByLabel(/城市/).fill("南京市");
+  await branchRecord.getByLabel("高德地点搜索").fill("上海高德演示地点");
+  await branchRecord.getByRole("button", { name: "搜索位置" }).click();
+  await branchRecord.getByRole("button", { name: /高德演示地点/ }).click();
   await addDialog.getByRole("button", { name: "添加客户集团" }).click();
   await expect(page.getByRole("row").filter({ hasText: "新增客户集团" })).toBeVisible();
 
@@ -626,81 +715,58 @@ test("客户集团主档集成总部、分支和二次确认删除", async ({ pa
   await expect(page.getByRole("row").filter({ hasText: "更新客户集团" })).toHaveCount(0);
 });
 
-test("同行主列表按需进入据点、交易关联和强势区域详情", async ({ page }) => {
-  await openAdmin(page);
-  await page.getByRole("tab", { name: "同行", exact: true }).click();
-  const competitorRow = page.getByRole("row").filter({ hasText: "演示同行" });
-  await competitorRow.getByRole("button", { name: "修改", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "演示同行", exact: true })).toBeVisible();
-  const detailHeader = page.locator(".competitor-detail-header");
-  const summary = detailHeader.getByLabel("同行档案摘要");
-  await expect(summary).toContainText("1 个据点");
-  const headerLayout = await detailHeader.evaluate((element) => {
-    const main = element.querySelector(".competitor-detail-main");
-    const actions = element.querySelector(".organization-row-actions");
-    const identityRect = element.querySelector(".competitor-detail-identity")?.getBoundingClientRect();
-    const summaryRect = element.querySelector(".competitor-summary-strip")?.getBoundingClientRect();
-    const mainRect = main?.getBoundingClientRect();
-    const actionsRect = actions?.getBoundingClientRect();
-    const headerRect = element.getBoundingClientRect();
-    const editRect = Array.from(element.querySelectorAll("button")).find((button) => button.textContent?.includes("修改主档"))?.getBoundingClientRect();
-    return {
-      summaryInsideMain: element.querySelector(".competitor-summary-strip")?.parentElement === main,
-      summaryBesideIdentity: Boolean(identityRect && summaryRect && summaryRect.left >= identityRect.right && Math.abs(summaryRect.top - identityRect.top) < 16),
-      actionsStayRight: Boolean(mainRect && actionsRect && editRect && mainRect.right <= actionsRect.left && editRect.left >= actionsRect.left),
-      summaryStartsLeft: Boolean(summaryRect && summaryRect.left < headerRect.left + headerRect.width / 2),
-    };
+test("独立同行页移除且同行订单可打开并编辑公司详情抽屉", async ({ page }) => {
+  let profilePayload: Record<string, unknown> | null = null;
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname.endsWith("/admin-competitors/competitor-1") && request.method() === "PUT") profilePayload = request.postDataJSON() as Record<string, unknown>;
   });
-  expect(headerLayout).toEqual({ summaryInsideMain: true, summaryBesideIdentity: true, actionsStayRight: true, summaryStartsLeft: true });
-  await expect(page.getByText("演示同行总部", { exact: true })).toBeVisible();
+  await openAdmin(page);
+  await expect(page.getByRole("tab", { name: "同行", exact: true })).toHaveCount(0);
+  await page.getByRole("tab", { name: "成交订单", exact: true }).click();
+  const detailTrigger = page.getByRole("button", { name: "查看演示同行同行公司详情" });
+  await detailTrigger.click();
+  const drawer = page.getByRole("dialog", { name: "演示同行" });
+  await expect(drawer).toBeVisible();
+  await expect(drawer.getByText("展示全部同行成交信息")).toBeVisible();
+  await expect(drawer.getByLabel("覆盖范围内同行摘要")).toContainText("1 笔订单");
+  await expect(drawer.getByText("演示同行总部", { exact: true })).toBeVisible();
+  await expect(drawer.getByText("演示成交单位", { exact: true })).toBeVisible();
+  await drawer.getByLabel("公司说明").fill("订单页补充的虚构同行资料");
+  await drawer.getByRole("button", { name: "保存公司资料" }).click();
+  await expect(drawer.getByRole("status")).toContainText("同行公司资料已保存");
+  expect(profilePayload).toMatchObject({ name: "演示同行", description: "订单页补充的虚构同行资料", is_active: true });
+  if (process.env.ADMIN_COMPETITOR_DRAWER_DESKTOP_SCREENSHOT) await page.screenshot({ path: process.env.ADMIN_COMPETITOR_DRAWER_DESKTOP_SCREENSHOT, fullPage: true });
 
-  await page.getByRole("tab", { name: "成交单位与交易" }).click();
-  const customerRow = page.getByRole("row").filter({ hasText: "演示成交单位" });
-  await expect(customerRow).toBeVisible();
-  await customerRow.getByRole("button", { name: "交易与关联" }).click();
-  await expect(page.getByText("演示成交项目", { exact: true })).toBeVisible();
-  await expect(page.getByText("台式气相色谱仪", { exact: true })).toBeVisible();
-  await page.getByRole("row").filter({ hasText: "演示成交项目" }).getByRole("button", { name: "修改" }).click();
-  const dealDialog = page.getByRole("dialog", { name: "编辑同行成交记录" });
-  await expect(dealDialog.getByLabel(/产品名称/)).toHaveValue("台式气相色谱仪");
-  await expect(dealDialog.getByLabel(/^品牌$/)).toHaveValue("虚构品牌甲");
-  await expect(dealDialog.getByLabel(/产品规格/)).toHaveValue("GC-DEMO-01");
-  await expect(dealDialog.getByLabel(/产品图片路径或 URL/)).toHaveValue("/cases/jiangsu-lab.webp");
-  await expect(dealDialog.getByLabel(/单价（元）/)).toHaveValue("130000.25");
-  await expect(dealDialog.getByLabel(/数量/)).toHaveValue("2.000");
-  await expect(dealDialog.getByLabel(/供应商名称/)).toHaveValue("虚构仪器供应商");
-  await dealDialog.getByRole("button", { name: "取消" }).click();
-  await expect(page.getByText("演示目标单位", { exact: true })).toBeVisible();
-
-  await page.getByRole("tab", { name: "强势区域" }).click();
-  await expect(page.getByText("虚构测试依据", { exact: true })).toHaveCount(0);
-  await expect(page.getByText("公开地图计算结果", { exact: true })).toBeVisible();
-  await expect(page.getByText(/得分 88.50/)).toBeVisible();
-  if (process.env.ADMIN_COMPETITOR_DETAIL_SCREENSHOT) await page.screenshot({ path: process.env.ADMIN_COMPETITOR_DETAIL_SCREENSHOT, fullPage: true });
+  await drawer.getByRole("button", { name: "关闭同行公司详情" }).click();
+  await expect(drawer).toHaveCount(0);
+  await expect(detailTrigger).toBeFocused();
+  await detailTrigger.click();
   await page.setViewportSize({ width: 390, height: 844 });
-  const mobileHeaderFits = await detailHeader.evaluate((element) => ({
-    summaryInsideMain: element.querySelector(".competitor-summary-strip")?.parentElement?.classList.contains("competitor-detail-main"),
-    documentFits: document.documentElement.scrollWidth <= document.documentElement.clientWidth,
-  }));
-  expect(mobileHeaderFits).toEqual({ summaryInsideMain: true, documentFits: true });
-  await page.getByRole("button", { name: "返回同行列表" }).click();
-  await expect(page.getByRole("navigation", { name: "同行列表分页" })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+  if (process.env.ADMIN_COMPETITOR_DRAWER_MOBILE_SCREENSHOT) await page.screenshot({ path: process.env.ADMIN_COMPETITOR_DRAWER_MOBILE_SCREENSHOT, fullPage: true });
+  await page.getByRole("dialog", { name: "演示同行" }).getByRole("button", { name: "筛选全部订单" }).click();
+  await expect(page.getByLabel("订单归属")).toHaveValue("competitor");
+  await expect(page.locator(".admin-deal-filters select").nth(2)).toHaveValue("competitor-1");
 });
 
-test("空数据、接口错误和移动端横向导航均有安全边界", async ({ page }) => {
+test("空数据、同行抽屉错误和移动端横向导航均有安全边界", async ({ page }) => {
   await openAdmin(page);
   await page.route("**/api/v1/admin-customer-groups**", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ items: [], total: 0, page: 1, page_size: 10 }) }));
   await page.getByRole("tab", { name: "客户集团", exact: true }).click();
   await expect(page.getByText(/暂无匹配客户集团/)).toBeVisible();
 
-  await page.route("**/api/v1/admin-competitors**", (route) => route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ detail: "同行数据暂不可用" }) }));
-  await page.getByRole("tab", { name: "同行", exact: true }).click();
-  await expect(page.locator(".admin-page-error")).toContainText("同行数据暂不可用");
+  await page.route("**/api/v1/admin-competitors/competitor-1", (route) => route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ detail: "同行数据暂不可用" }) }));
+  await page.getByRole("tab", { name: "成交订单", exact: true }).click();
+  await page.getByRole("button", { name: "查看演示同行同行公司详情" }).click();
+  const drawer = page.getByRole("dialog", { name: "同行公司详情" });
+  await expect(drawer.getByRole("alert")).toContainText("同行数据暂不可用");
+  await expect(drawer.getByRole("button", { name: "重新加载" })).toBeVisible();
+  await drawer.getByRole("button", { name: "关闭同行公司详情" }).click();
 
   await page.setViewportSize({ width: 390, height: 844 });
   const metrics = await page.evaluate(() => {
     const tabs = document.querySelector<HTMLElement>(".admin-dataset-tabs");
-    const list = document.querySelector<HTMLElement>(".admin-data-list-card");
+    const list = document.querySelector<HTMLElement>(".admin-deal-list");
     const tabsRect = tabs?.getBoundingClientRect();
     const listRect = list?.getBoundingClientRect();
     return {
@@ -768,27 +834,6 @@ test("销售详情只采用最后一次点击，且活动单位候选在聚焦�
   await expect.poll(() => optionRequests).toBe(1);
 });
 
-test("同行子资源修改后重新计算公开强势区域", async ({ page }) => {
-  await openAdmin(page);
-  let computedRequests = 0;
-  await page.route("**/api/v1/public/competitors/competitor-1", async (route) => {
-    computedRequests += 1;
-    const score = computedRequests === 1 ? "88.50" : "77.00";
-    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ id: "competitor-1", name: "演示同行", color: "#25846F", description: "虚构同行", summary: { site_count: 1, customer_count: 1, linked_customer_count: 1, deal_count: 1, total_amount: "260000.50", strong_region_count: 1 }, sites: [], customers: [], strength_regions: [{ id: `computed-${computedRequests}`, region_level: "省", province: "江苏省", city: null, strength_level: "强", source_type: "公开信息", source_reference: "自动聚合", source_url: null, confidence: "高", basis: "计算结果", score, site_count: 1, customer_count: 1, total_amount: "260000.50" }] }) });
-  });
-
-  await page.getByRole("tab", { name: "同行", exact: true }).click();
-  await page.getByRole("row").filter({ hasText: "演示同行" }).getByRole("button", { name: "修改", exact: true }).click();
-  await page.getByRole("tab", { name: "强势区域" }).click();
-  await expect(page.getByText(/得分 88.50/)).toBeVisible();
-  await page.getByRole("tab", { name: "基本资料与据点" }).click();
-  await page.getByRole("row").filter({ hasText: "演示同行总部" }).getByRole("button", { name: "修改" }).click();
-  await page.getByRole("dialog").getByRole("button", { name: "保存修改" }).click();
-  await page.getByRole("tab", { name: "强势区域" }).click();
-  await expect(page.getByText(/得分 77.00/)).toBeVisible();
-  expect(computedRequests).toBe(2);
-});
-
 test("单位筛选和详情抽屉具备完整键盘语义", async ({ page }) => {
   await openAdmin(page);
   const listItem = { id: "org-a11y", name: "无障碍演示单位", organization_type: "企业", customer_status: "潜在客户", review_status: "待核验", is_sports_exception: false, sites: [{ id: "site-a11y", is_primary: true, province: "浙江省", city: "杭州市", district: "西湖区", address: "演示路 1 号", geocode_status: "已定位", longitude: 120.1, latitude: 30.2 }] };
@@ -843,10 +888,12 @@ test("成交订单页可直接新增优纳特订单并修改删除同行订单",
   /** 验证统一页面复用公共数据库写入，且编辑合同保留完整多产品结构。 */
   let updatePayload: Record<string, unknown> | null = null;
   let uniteCreatePayload: Record<string, unknown> | null = null;
+  let competitorCreatePayload: Record<string, unknown> | null = null;
   let deleteRequests = 0;
   page.on("request", (request) => {
     const pathname = new URL(request.url()).pathname;
-    if (pathname.endsWith("/admin-data/competitor_deals/deal-1") && request.method() === "PUT") updatePayload = request.postDataJSON() as Record<string, unknown>;
+    if (pathname.endsWith("/admin-deals/competitor/deal-1") && request.method() === "PUT") updatePayload = request.postDataJSON() as Record<string, unknown>;
+    if (pathname.endsWith("/admin-deals/competitor") && request.method() === "POST") competitorCreatePayload = request.postDataJSON() as Record<string, unknown>;
     if (pathname.endsWith("/admin-data/competitor_deals/deal-1") && request.method() === "DELETE") deleteRequests += 1;
     if (pathname.endsWith("/admin-deals/unite") && request.method() === "POST") uniteCreatePayload = request.postDataJSON() as Record<string, unknown>;
   });
@@ -864,6 +911,9 @@ test("成交订单页可直接新增优纳特订单并修改删除同行订单",
   expect(actionsBox!.y).toBeGreaterThan(amountBox!.y);
   await orderCard.getByRole("button", { name: "修改" }).click();
   const editDialog = page.getByRole("dialog", { name: /修改演示成交项目/ });
+  await expect(editDialog.getByLabel("订单归属")).toBeEnabled();
+  await expect(editDialog.getByLabel("成交同行", { exact: true })).toHaveValue("演示同行");
+  await expect(editDialog.getByLabel("成交单位", { exact: true })).toHaveValue("演示成交单位");
   await editDialog.getByLabel(/项目名称/).fill("更新演示成交项目");
   await editDialog.getByRole("button", { name: "添加产品" }).click();
   const secondProduct = editDialog.locator(".admin-product-editor article").nth(1);
@@ -874,8 +924,9 @@ test("成交订单页可直接新增优纳特订单并修改删除同行订单",
   await editDialog.getByRole("button", { name: "保存修改" }).click();
   await expect(page.getByText("订单修改已保存", { exact: true })).toBeVisible();
   expect(updatePayload).not.toBeNull();
-  const capturedUpdate = updatePayload as unknown as { data: { products: unknown[] } } | null;
-  expect(capturedUpdate?.data.products).toHaveLength(2);
+  const capturedUpdate = updatePayload as unknown as { competitor_id: string; organization_id: string; products: unknown[] } | null;
+  expect(capturedUpdate).toMatchObject({ competitor_id: "competitor-1", organization_id: "org-1" });
+  expect(capturedUpdate?.products).toHaveLength(2);
 
   const updatedCard = page.locator(".admin-deal-list article").filter({ hasText: "更新演示成交项目" });
   await updatedCard.getByRole("button", { name: "删除" }).click();
@@ -888,7 +939,14 @@ test("成交订单页可直接新增优纳特订单并修改删除同行订单",
   await page.getByRole("button", { name: "添加订单" }).click();
   const createDialog = page.getByRole("dialog", { name: "添加成交订单" });
   await expect(createDialog.getByLabel("订单归属")).toHaveValue("unite");
-  await createDialog.getByLabel("成交单位", { exact: true }).selectOption("org-1");
+  await expect(createDialog.locator('datalist option[value="演示目标单位"]')).toHaveCount(1);
+  await createDialog.getByLabel("成交单位", { exact: true }).fill("演示目标单位");
+  await createDialog.getByRole("combobox", { name: "成交单位所在地" }).fill("上海演示园区");
+  await createDialog.getByRole("button", { name: "搜索位置" }).click();
+  await createDialog.getByRole("button", { name: /高德演示地点/ }).click();
+  await expect(createDialog.getByRole("textbox", { name: /所在地名称/ })).toHaveValue("高德演示地点");
+  await expect(createDialog.getByRole("textbox", { name: /省份/ })).toHaveValue("上海市");
+  await expect(createDialog.getByRole("textbox", { name: /城市/ })).toHaveValue("上海市");
   await createDialog.getByLabel(/项目名称/).fill("新建优纳特订单");
   await createDialog.getByLabel(/项目总价/).fill("88000");
   await createDialog.getByLabel("负责销售", { exact: true }).selectOption("sales-1");
@@ -903,7 +961,74 @@ test("成交订单页可直接新增优纳特订单并修改删除同行订单",
   expect(mobileDialogBox!.x + mobileDialogBox!.width).toBeLessThanOrEqual(390);
   await createDialog.getByRole("button", { name: "添加订单" }).click();
   await expect(page.getByText("成交订单已添加", { exact: true })).toBeVisible();
-  expect(uniteCreatePayload).toMatchObject({ organization_id: "org-1", salesperson_id: "sales-1", project_name: "新建优纳特订单" });
+  expect(uniteCreatePayload).toMatchObject({ organization_id: "org-1", salesperson_id: "sales-1", project_name: "新建优纳特订单", location_name: "高德演示地点", province: "上海市", city: "上海市" });
   const capturedCreate = uniteCreatePayload as unknown as { products: unknown[] } | null;
   expect(capturedCreate?.products).toHaveLength(1);
+
+  await page.getByRole("button", { name: "添加订单" }).click();
+  const competitorDialog = page.getByRole("dialog", { name: "添加成交订单" });
+  await competitorDialog.getByLabel("订单归属").selectOption("competitor");
+  await expect(competitorDialog.getByLabel("成交同行", { exact: true })).toHaveCount(1);
+  await expect(competitorDialog.getByLabel("成交单位", { exact: true })).toHaveCount(1);
+  await competitorDialog.getByLabel("成交同行", { exact: true }).fill("虚构新同行");
+  await competitorDialog.getByLabel("成交单位", { exact: true }).fill("虚构新成交单位");
+  await competitorDialog.getByRole("combobox", { name: "成交单位所在地" }).fill("上海演示园区");
+  await competitorDialog.getByRole("button", { name: "搜索位置" }).click();
+  await competitorDialog.getByRole("button", { name: /高德演示地点/ }).click();
+  await competitorDialog.getByLabel(/项目名称/).fill("情报待补订单");
+  await competitorDialog.getByLabel(/项目总价/).fill("66000");
+  const competitorProduct = competitorDialog.locator(".admin-product-editor article").first();
+  await competitorProduct.getByLabel(/产品名称/).fill("同行演示产品");
+  await competitorProduct.getByLabel(/产品总价/).fill("66000");
+  await expect(competitorDialog.getByLabel("成交类型", { exact: true })).not.toHaveAttribute("required");
+  await expect(competitorDialog.getByRole("combobox", { name: /来源类型/ })).toHaveValue("");
+  await expect(competitorDialog.getByRole("combobox", { name: /置信度/ })).toHaveValue("");
+  await expect(competitorDialog.getByLabel("来源说明", { exact: true })).not.toHaveAttribute("required");
+  await expect(competitorDialog.getByText("未选择现有项时，保存后自动建档待审核", { exact: true })).toHaveCount(2);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+  await competitorDialog.getByRole("button", { name: "添加订单" }).click();
+  await expect(page.getByText("成交订单已添加", { exact: true })).toBeVisible();
+  expect(competitorCreatePayload).toMatchObject({
+    location_name: "高德演示地点",
+    province: "上海市",
+    city: "上海市",
+    deal_type: null,
+    source_type: null,
+    source_reference: null,
+    confidence: null,
+  });
+  for (const discardedField of ["address", "district", "amap_adcode", "longitude", "latitude"]) {
+    expect(competitorCreatePayload).not.toHaveProperty(discardedField);
+  }
+});
+
+test("编辑成交订单时可切换归属并保留成交单位", async ({ page }) => {
+  /** 验证同行转优纳特使用专用原子接口，且不会混淆成交同行与成交单位。 */
+  if (!resourceItems.competitor_deals.some((item) => item.id === "deal-1")) {
+    resourceItems.competitor_deals.push({
+      id: "deal-1", competitor_customer_id: "customer-1", project_name: "演示成交项目", deal_type: "设备",
+      supplier_name: "虚构仪器供应商", amount: "260000.50", signed_at: "2026-07-15", source_type: "公开信息",
+      source_reference: "虚构合同公告", source_url: null, confidence: "高", notes: null,
+      products: [{ id: "deal-product-1", product_name: "台式气相色谱仪", brand: "虚构品牌甲", specification_model: "GC-DEMO-01", product_image_url: "/cases/jiangsu-lab.webp", unit_price: "130000.25", quantity: "2.000", line_total: "260000.50" }],
+    });
+  }
+  let conversionPayload: Record<string, unknown> | null = null;
+  page.on("request", (request) => {
+    const pathname = new URL(request.url()).pathname;
+    if (pathname.endsWith("/admin-deals/competitor/deal-1/convert-to-unite") && request.method() === "PUT") {
+      conversionPayload = request.postDataJSON() as Record<string, unknown>;
+    }
+  });
+
+  await openAdmin(page);
+  await page.getByRole("tab", { name: "成交订单", exact: true }).click();
+  await page.locator(".admin-deal-list article").filter({ hasText: "演示成交项目" }).getByRole("button", { name: "修改" }).click();
+  const dialog = page.getByRole("dialog", { name: /修改演示成交项目/ });
+  await dialog.getByLabel("订单归属").selectOption("unite");
+  await expect(dialog.getByLabel("成交同行", { exact: true })).toHaveCount(0);
+  await expect(dialog.getByLabel("成交单位", { exact: true })).toHaveValue("演示成交单位");
+  await expect(dialog.getByText("保存后将原子转换订单归属，原订单不会重复保留", { exact: true })).toBeVisible();
+  await dialog.getByRole("button", { name: "保存修改" }).click();
+  await expect(page.getByText("订单归属已转换并保存", { exact: true })).toBeVisible();
+  expect(conversionPayload).toMatchObject({ organization_id: "org-1", project_name: "演示成交项目" });
 });

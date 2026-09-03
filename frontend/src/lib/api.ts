@@ -178,6 +178,7 @@ export interface OrganizationSalesProject {
   quantity?: string | null;
   supplier_name: string | null;
   specification_model?: string | null;
+  location_name?: string | null;
   province: string | null;
   city: string | null;
   signed_at: string | null;
@@ -247,7 +248,7 @@ export interface OrganizationUpdateInput {
   cooperation_level: CooperationLevel | null;
   notes: string | null;
   contacts: Array<Omit<OrganizationContact, "id"> & { id: string | null }>;
-  sales_projects: Array<Omit<OrganizationSalesProject, "id" | "contract_amount" | "unit_price" | "quantity" | "products"> & { id: string | null; contract_amount: number; unit_price?: number | null; quantity?: number | null; products: Array<Omit<OrderProductItem, "id" | "unit_price" | "quantity" | "line_total"> & { id: string | null; unit_price: number | null; quantity: number | null; line_total: number }> }>;
+  sales_projects?: Array<Omit<OrganizationSalesProject, "id" | "contract_amount" | "unit_price" | "quantity" | "products"> & { id: string | null; contract_amount: number; unit_price?: number | null; quantity?: number | null; products: Array<Omit<OrderProductItem, "id" | "unit_price" | "quantity" | "line_total"> & { id: string | null; unit_price: number | null; quantity: number | null; line_total: number }> }>;
   opportunities: Array<Omit<OrganizationOpportunity, "id" | "estimated_amount"> & { id: string | null; estimated_amount: number | null }>;
   primary_site: OrganizationSiteUpdateInput;
 }
@@ -585,7 +586,7 @@ export interface CompetitorSite {
 export interface CompetitorDeal {
   id: string;
   project_name: string;
-  deal_type: string;
+  deal_type: string | null;
   products: OrderProductItem[];
   product_name?: string | null;
   specification_model?: string | null;
@@ -595,10 +596,10 @@ export interface CompetitorDeal {
   supplier_name: string | null;
   amount: string;
   signed_at: string | null;
-  source_type: IntelligenceSourceType;
-  source_reference: string;
+  source_type: IntelligenceSourceType | null;
+  source_reference: string | null;
   source_url: string | null;
-  confidence: IntelligenceConfidence;
+  confidence: IntelligenceConfidence | null;
   notes: string | null;
 }
 
@@ -609,6 +610,7 @@ export interface AdminDealItem {
   seller_type: Exclude<AdminDealSeller, "all">;
   seller_id: string | null;
   customer_id: string;
+  organization_id: string | null;
   seller_name: string;
   customer_name: string;
   project_name: string;
@@ -618,6 +620,7 @@ export interface AdminDealItem {
   salesperson_id: string | null;
   salesperson_name: string | null;
   signed_at: string | null;
+  location_name: string | null;
   province: string | null;
   city: string | null;
   deal_type: string | null;
@@ -642,15 +645,36 @@ export interface AdminDealFilterOptions {
   years: number[];
 }
 
+export interface AdminCompetitorDetail {
+  id: string;
+  name: string;
+  website_url: string | null;
+  color: string;
+  description: string | null;
+  is_active: boolean;
+  summary: {
+    site_count: number;
+    customer_count: number;
+    linked_customer_count: number;
+    deal_count: number;
+    total_amount: string;
+  };
+  sites: CompetitorSite[];
+  customers: CompetitorCustomer[];
+  scope_limited: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface CompetitorCustomer {
   id: string;
   name: string;
   customer_level: CompetitorCustomerLevel;
-  address: string;
+  address: string | null;
   province: string;
   city: string;
-  longitude: number;
-  latitude: number;
+  longitude: number | null;
+  latitude: number | null;
   source_type: IntelligenceSourceType;
   source_reference: string;
   source_url: string | null;
@@ -728,7 +752,8 @@ export interface SalespersonActivitySummary {
 }
 
 export interface SalespersonPerformance {
-  period_months: SalespersonPeriodMonths;
+  period_months: SalespersonPeriodMonths | null;
+  period_year: number | null;
   activities: SalespersonActivitySummary;
   actual_sales_amount: string;
   pipeline_amount: string;

@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, call
 from uuid import UUID
 
 from fastapi.testclient import TestClient
+from sqlalchemy.dialects import postgresql
 
 from app.database import get_db
 from app.main import app
@@ -224,6 +225,22 @@ def test_scope_update_flushes_removed_rows_before_reinserting_retained_scope(mon
     assert captured["salesperson_id"] == UUID(int=501)
     assert [scope.scope_name for scope in captured["scopes"]] == ["杭州市", "重庆市"]
     assert call.commit() in db.method_calls
+
+
+def test_locked_authorized_user_query_does_not_join_nullable_salesperson() -> None:
+    """账号更新只锁定账号主表，避免 PostgreSQL 拒绝锁定可空销售外连接。"""
+
+    target = _user(2, "employee_test", UserRole.employee)
+    db = MagicMock()
+    db.scalar.return_value = target
+
+    result = authorized_user_service._get_authorized_user(db, target.id, for_update=True)
+
+    statement = db.scalar.call_args.args[0]
+    sql = str(statement.compile(dialect=postgresql.dialect()))
+    assert result is target
+    assert "FOR UPDATE" in sql
+    assert "JOIN salesperson" not in sql
 
 
 def test_super_admin_can_delete_another_user(monkeypatch) -> None:

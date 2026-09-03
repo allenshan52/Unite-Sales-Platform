@@ -17,8 +17,9 @@ import {
   TrendingUp,
   X,
 } from "lucide-react";
-import { projectMapCoordinates, provinceNames } from "@/components/home-organization-heatmap";
+import { useLatestRequest } from "@/hooks/use-latest-request";
 import { apiDownload, apiFetch, queryString, type InsightsMacroRegion, type InsightsMetric, type InsightsOverview, type InsightsPeriod, type InsightsRegion, type InsightsScopeMode } from "@/lib/api";
+import { projectMapCoordinates, provinceNames } from "@/lib/china-map";
 
 const periods: Array<{ value: InsightsPeriod; label: string }> = [
   { value: "year", label: "全年" },
@@ -184,6 +185,7 @@ export function HomeDataInsights() {
   const [cityPinUnitsPerPixel, setCityPinUnitsPerPixel] = useState(1);
   const [toast, setToast] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
+  const { cancel: cancelCityRequest, run: runCityRequest } = useLatestRequest();
   const national = useInsightsOverview(year, period, metric, scopeMode);
   const province = useInsightsOverview(year, period, metric, scopeMode, selectedProvince ?? undefined, selectedProvince !== null);
   const overview = selectedProvince ? province.data ?? national.data : national.data;
@@ -207,12 +209,14 @@ export function HomeDataInsights() {
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
+      cancelCityRequest();
       setSelectedCity(null);
       setCityOverview(null);
+      setCityLoading(false);
       setCityError(null);
     });
     return () => cancelAnimationFrame(frame);
-  }, [metric, period, scopeMode, selectedProvince, year]);
+  }, [cancelCityRequest, metric, period, scopeMode, selectedProvince, year]);
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
@@ -251,21 +255,35 @@ export function HomeDataInsights() {
   }, [toast]);
 
   /** 点击城市后按需读取城市统计，抽屉不复用省级数据冒充。 */
-  const openCity = useCallback((city: InsightsRegion) => {
+  const openCity = useCallback(async (city: InsightsRegion) => {
     if (!selectedProvince) return;
-    const controller = new AbortController();
     setSelectedCity(city);
     setCityOverview(null);
     setCityError(null);
     setCityLoading(true);
-    apiFetch<InsightsOverview>(`/public/insights/overview${queryString({ year: String(year), period, metric, scope_mode: scopeMode, province: selectedProvince, city: city.name })}`, { signal: controller.signal })
-      .then(setCityOverview)
-      .catch((requestError: unknown) => setCityError(requestError instanceof Error ? requestError.message : "城市统计加载失败"))
-      .finally(() => setCityLoading(false));
-  }, [metric, period, scopeMode, selectedProvince, year]);
+    try {
+      const result = await runCityRequest((signal) => apiFetch<InsightsOverview>(`/public/insights/overview${queryString({ year: String(year), period, metric, scope_mode: scopeMode, province: selectedProvince, city: city.name })}`, { signal }));
+      if (!result) return;
+      setCityOverview(result);
+      setCityLoading(false);
+    } catch (requestError) {
+      setCityError(requestError instanceof Error ? requestError.message : "城市统计加载失败");
+      setCityLoading(false);
+    }
+  }, [metric, period, runCityRequest, scopeMode, selectedProvince, year]);
+
+  /** 关闭城市抽屉时同步取消请求，避免迟到响应重新填充已关闭的详情。 */
+  const closeCity = useCallback(() => {
+    cancelCityRequest();
+    setSelectedCity(null);
+    setCityOverview(null);
+    setCityLoading(false);
+    setCityError(null);
+  }, [cancelCityRequest]);
 
   /** 返回全国层级并恢复完整地图视图。 */
   function resetProvince() {
+    cancelCityRequest();
     setSelectedProvince(null);
     setSelectedCity(null);
     setCityOverview(null);
@@ -448,7 +466,7 @@ export function HomeDataInsights() {
       </article>
 
       {selectedCity ? <aside className="insight-detail-drawer" role="dialog" aria-modal="true" aria-label={`${selectedCity.name}年度统计`}>
-        <header><div><span>城市经营统计 · 数据库聚合</span><h2>{selectedCity.name}</h2><p>{year} 年 · {periodLabel}</p></div><button type="button" onClick={() => setSelectedCity(null)} aria-label="关闭城市详情"><X size={19} /></button></header>
+        <header><div><span>城市经营统计 · 数据库聚合</span><h2>{selectedCity.name}</h2><p>{year} 年 · {periodLabel}</p></div><button type="button" onClick={closeCity} aria-label="关闭城市详情"><X size={19} /></button></header>
         {cityLoading ? <div className="insight-drawer-state" role="status"><RefreshCw className="is-spinning" size={18} />正在聚合城市数据</div> : cityError ? <div className="insight-drawer-state is-error" role="alert">{cityError}</div> : cityOverview ? <>
           <div className="insight-drawer-total"><span>实际销售额</span><strong>{formatWan(cityOverview.kpis.sales_amount)}<small>万元</small></strong><p><TrendingUp size={14} />{formatChange("同比", cityOverview.kpis.sales_yoy_percent)}{period === "year" ? "" : ` · ${formatChange("环比", cityOverview.kpis.sales_qoq_percent)}`}</p></div>
           <div className="insight-drawer-kpis"><article><span>成交项目</span><b>{cityOverview.kpis.project_count} 个</b></article><article><span>平均成交额</span><b>{formatWan(cityOverview.kpis.average_deal_amount)} 万</b></article><article><span>当前商机储备</span><b>{formatWan(cityOverview.kpis.pipeline_amount)} 万</b></article><article><span>省内贡献占比</span><b>{Number(selectedCity.contribution_percent).toFixed(1)}%</b></article></div>

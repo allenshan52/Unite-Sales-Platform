@@ -139,6 +139,28 @@ async function mockInsightsApi(page: Page): Promise<void> {
   });
 }
 
+/** 用完全虚构的管理员会话打开洞察页，让竞态用例不依赖真实数据库或登录限流。 */
+async function openMockedInsights(page: Page): Promise<void> {
+  await page.route("**/api/v1/auth/me", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      username: "insights_test", role: "超级管理员", salesperson_id: null,
+      can_manage_users: true, can_manage_salespeople: true, coverage_scopes: [],
+    }),
+  }));
+  await page.route("**/api/v1/public/organizations/**", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: route.request().url().includes("filters")
+      ? JSON.stringify({ organization_types: [], customer_statuses: [], review_statuses: [], provinces: [], cities: [], districts: [] })
+      : "[]",
+  }));
+  await page.goto(pageUrl, { waitUntil: "domcontentloaded" });
+  await page.getByRole("tab", { name: "数据洞察", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "专属区域经营洞察" })).toBeVisible();
+}
+
 /** 使用真实服务端会话进入数据洞察页。 */
 async function loginAndOpenInsights(page: Page): Promise<void> {
   test.setTimeout(90_000);
@@ -278,4 +300,22 @@ test("大区视角显示完整大区数据并把范围参数传给接口", async
   await expect(page.getByRole("heading", { name: "全部大区数据" })).toBeVisible();
   await expect(page.locator(".insight-region-row")).toHaveCount(4);
   expect(requestedModes).toContain("region");
+});
+
+test("快速切换城市时只保留最后一次详情请求", async ({ page }) => {
+  await page.route("**/api/v1/public/insights/**", async (route) => {
+    const url = new URL(route.request().url());
+    const city = url.searchParams.get("city");
+    if (city === "苏州市") await new Promise((resolve) => setTimeout(resolve, 350));
+    if (city === "南京市") await new Promise((resolve) => setTimeout(resolve, 20));
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(overviewFor(url)) });
+  });
+  await openMockedInsights(page);
+  await page.locator('[data-insight-province="jiangsu"]').click();
+  await page.getByRole("button", { name: "查看苏州市经营详情" }).click();
+  await page.getByRole("button", { name: "查看南京市经营详情" }).click();
+
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByRole("heading", { name: "南京市" })).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "苏州市" })).toHaveCount(0);
 });

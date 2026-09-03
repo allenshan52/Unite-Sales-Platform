@@ -167,16 +167,18 @@ def customer_group_visibility_condition(scope: AccountDataScope):
 
 
 def unite_deal_visibility_condition(scope: AccountDataScope):
-    """优纳特订单按订单省市或所属单位任一地点判断区域交集。"""
+    """优纳特订单优先按完整所在地快照授权；仅旧订单缺失快照时回退单位地点。"""
 
     if scope.unrestricted:
         return true()
+    has_snapshot = and_(SalesProject.province.is_not(None), SalesProject.city.is_not(None))
+    missing_snapshot = and_(SalesProject.province.is_(None), SalesProject.city.is_(None))
     return or_(
-        location_condition(SalesProject.province, SalesProject.city, scope),
-        exists(select(1).where(
+        and_(has_snapshot, location_condition(SalesProject.province, SalesProject.city, scope)),
+        and_(missing_snapshot, exists(select(1).where(
             OrganizationSite.organization_id == SalesProject.organization_id,
             location_condition(OrganizationSite.province, OrganizationSite.city, scope),
-        )),
+        ))),
     )
 
 
@@ -237,6 +239,72 @@ def require_unite_deal_access(db: Session, deal_id: UUID, scope: AccountDataScop
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="当前账号不能访问该成交订单")
 
 
+def competitor_order_location_condition(scope: AccountDataScope):
+    """在已关联成交单位的查询中，按订单快照或旧数据的单位所在地判断同行订单权限。"""
+
+    if scope.unrestricted:
+        return true()
+    has_snapshot = and_(CompetitorDeal.province.is_not(None), CompetitorDeal.city.is_not(None))
+    missing_snapshot = and_(CompetitorDeal.province.is_(None), CompetitorDeal.city.is_(None))
+    return or_(
+        and_(has_snapshot, location_condition(CompetitorDeal.province, CompetitorDeal.city, scope)),
+        and_(missing_snapshot, location_condition(CompetitorCustomer.province, CompetitorCustomer.city, scope)),
+    )
+
+
+def competitor_order_visibility_condition(scope: AccountDataScope):
+    """为未关联成交单位的查询生成同行订单权限条件，防止单位表隐式笛卡尔积。"""
+
+    if scope.unrestricted:
+        return true()
+    has_snapshot = and_(CompetitorDeal.province.is_not(None), CompetitorDeal.city.is_not(None))
+    missing_snapshot = and_(CompetitorDeal.province.is_(None), CompetitorDeal.city.is_(None))
+    customer_match = exists(select(1).where(
+        CompetitorCustomer.id == CompetitorDeal.competitor_customer_id,
+        location_condition(CompetitorCustomer.province, CompetitorCustomer.city, scope),
+    ))
+    return or_(
+        and_(has_snapshot, location_condition(CompetitorDeal.province, CompetitorDeal.city, scope)),
+        and_(missing_snapshot, customer_match),
+    )
+
+
+def competitor_order_is_visible(
+    scope: AccountDataScope,
+    deal: CompetitorDeal,
+    customer: CompetitorCustomer,
+) -> bool:
+    """在响应组装时复用订单所在地优先规则，避免已加载关系泄露范围外订单。"""
+
+    if scope.unrestricted:
+        return True
+    province = getattr(deal, "province", None)
+    city = getattr(deal, "city", None)
+    has_snapshot = bool(province) and bool(city)
+    missing_snapshot = not province and not city
+    if has_snapshot:
+        return location_is_visible(scope, province, city)
+    if missing_snapshot:
+        return location_is_visible(scope, customer.province, customer.city)
+    return False
+
+
+def competitor_deal_visibility_condition(scope: AccountDataScope):
+    """仅以可见成交订单判断同行主档是否允许编辑，避免据点扩大写权限。"""
+
+    if scope.unrestricted:
+        return true()
+    return exists(
+        select(1)
+        .select_from(CompetitorDeal)
+        .join(CompetitorCustomer, CompetitorCustomer.id == CompetitorDeal.competitor_customer_id)
+        .where(
+            CompetitorCustomer.competitor_id == Competitor.id,
+            competitor_order_location_condition(scope),
+        )
+    )
+
+
 def competitor_visibility_condition(scope: AccountDataScope, creator_username: str | None = None):
     """同行命中区域即可见；新建但尚无据点的主档仅对创建者临时可见。"""
 
@@ -246,15 +314,7 @@ def competitor_visibility_condition(scope: AccountDataScope, creator_username: s
         CompetitorSite.competitor_id == Competitor.id,
         location_condition(CompetitorSite.province, CompetitorSite.city, scope),
     ))
-    deal_match = exists(
-        select(1)
-        .select_from(CompetitorDeal)
-        .join(CompetitorCustomer, CompetitorCustomer.id == CompetitorDeal.competitor_customer_id)
-        .where(
-            CompetitorCustomer.competitor_id == Competitor.id,
-            location_condition(CompetitorCustomer.province, CompetitorCustomer.city, scope),
-        )
-    )
+    deal_match = competitor_deal_visibility_condition(scope)
     conditions = [site_match, deal_match]
     if creator_username:
         conditions.append(exists(select(1).where(

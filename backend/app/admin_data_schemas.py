@@ -20,6 +20,7 @@ from app.models import (
     OpportunityStage,
     SalesActivityType,
 )
+from app.schemas import CompetitorCustomerRead, CompetitorSiteRead
 from app.sales_coverage import SalesCoverageLevel, normalize_coverage_scope
 
 
@@ -259,7 +260,7 @@ class CompetitorAdminInput(AdminDataInput):
 
 
 class CompetitorAdminListItem(CompetitorAdminInput):
-    """同行主列表的一行聚合数据，避免前端逐同行补查明细。"""
+    """同行主列表的一行聚合数据，只返回管理页仍展示的业务摘要。"""
 
     id: UUID
     primary_site_name: str | None
@@ -270,8 +271,6 @@ class CompetitorAdminListItem(CompetitorAdminInput):
     pending_link_count: int = Field(ge=0)
     deal_count: int = Field(ge=0)
     total_amount: Decimal = Field(ge=0)
-    strength_region_count: int = Field(ge=0)
-    strength_regions: list[str]
     created_at: datetime
     updated_at: datetime
 
@@ -283,6 +282,28 @@ class CompetitorAdminListPage(BaseModel):
     total: int = Field(ge=0)
     page: int = Field(ge=1)
     page_size: int = Field(ge=1)
+
+
+class CompetitorAdminSummary(BaseModel):
+    """汇总当前账号覆盖范围内可见的同行据点、单位和订单。"""
+
+    site_count: int = Field(ge=0)
+    customer_count: int = Field(ge=0)
+    linked_customer_count: int = Field(ge=0)
+    deal_count: int = Field(ge=0)
+    total_amount: Decimal = Field(ge=0)
+
+
+class CompetitorAdminDetail(CompetitorAdminInput):
+    """成交订单抽屉使用的同行主档及区域裁剪后的业务详情。"""
+
+    id: UUID
+    summary: CompetitorAdminSummary
+    sites: list[CompetitorSiteRead]
+    customers: list[CompetitorCustomerRead]
+    scope_limited: bool
+    created_at: datetime
+    updated_at: datetime
 
 
 class CompetitorSiteAdminInput(AdminDataInput):
@@ -305,16 +326,16 @@ class CompetitorSiteAdminInput(AdminDataInput):
 
 
 class CompetitorCustomerAdminInput(AdminDataInput):
-    """同行成交单位全部可维护业务字段。"""
+    """同行成交单位全部可维护业务字段，待补地址记录允许暂缺地址和坐标。"""
 
     competitor_id: UUID
     name: str = Field(min_length=2, max_length=255)
     customer_level: CompetitorCustomerLevel
-    address: str = Field(min_length=2, max_length=500)
+    address: str | None = Field(default=None, max_length=500)
     province: str = Field(min_length=2, max_length=60)
     city: str = Field(min_length=2, max_length=60)
-    longitude: float = Field(ge=72.004, le=137.8347)
-    latitude: float = Field(ge=0.8293, le=55.8271)
+    longitude: float | None = Field(default=None, ge=72.004, le=137.8347)
+    latitude: float | None = Field(default=None, ge=0.8293, le=55.8271)
     source_type: IntelligenceSourceType
     source_reference: str = Field(min_length=2, max_length=500)
     source_url: str | None = Field(default=None, max_length=1000)
@@ -322,6 +343,14 @@ class CompetitorCustomerAdminInput(AdminDataInput):
     first_observed_at: date | None = None
     last_verified_at: date | None = None
     notes: str | None = Field(default=None, max_length=5000)
+
+    @model_validator(mode="after")
+    def validate_coordinate_pair(self) -> "CompetitorCustomerAdminInput":
+        """经纬度必须同时填写或同时留空，避免产生半个地图点。"""
+
+        if (self.longitude is None) != (self.latitude is None):
+            raise ValueError("经度和纬度必须同时填写或同时留空")
+        return self
 
 
 class CompetitorDealProductAdminInput(AdminDataInput):
@@ -342,7 +371,7 @@ class CompetitorDealAdminInput(AdminDataInput):
 
     competitor_customer_id: UUID
     project_name: str = Field(min_length=2, max_length=255)
-    deal_type: str = Field(min_length=1, max_length=80)
+    deal_type: str | None = Field(default=None, min_length=1, max_length=80)
     # 兼容迁移期间的旧表单；服务层会把这些字段转换为第一条 products 明细。
     product_name: str | None = Field(default=None, max_length=255)
     specification_model: str | None = Field(default=None, max_length=255)
@@ -352,10 +381,10 @@ class CompetitorDealAdminInput(AdminDataInput):
     supplier_name: str | None = Field(default=None, max_length=255)
     amount: Decimal = Field(gt=0)
     signed_at: date | None = None
-    source_type: IntelligenceSourceType
-    source_reference: str = Field(min_length=2, max_length=500)
+    source_type: IntelligenceSourceType | None = None
+    source_reference: str | None = Field(default=None, min_length=2, max_length=500)
     source_url: str | None = Field(default=None, max_length=1000)
-    confidence: IntelligenceConfidence
+    confidence: IntelligenceConfidence | None = None
     notes: str | None = Field(default=None, max_length=5000)
     products: list[CompetitorDealProductAdminInput] = Field(default_factory=list, max_length=100)
 

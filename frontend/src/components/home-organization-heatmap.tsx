@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import chinaMap from "@svg-maps/china";
 import Image from "next/image";
+import { projectMapCoordinates, provinceNames } from "@/lib/china-map";
 import {
   apiFetch,
   queryString,
@@ -41,26 +42,11 @@ export const dealHeatLevels: readonly HeatLevel[] = [
 /** 意向模式使用由浅到深的相对色阶，避免把成交金额档位错误套用于预计采购额。 */
 const intentionHeatColors = ["#dcefe9", "#b6ddd1", "#7fc5b3", "#429d86", "#14735f"] as const;
 
-export const provinceNames: Record<string, string> = {
-  anhui: "安徽省", beijing: "北京市", chongqing: "重庆市", fujian: "福建省", gansu: "甘肃省",
-  guangdong: "广东省", "guangxi-zhuang": "广西壮族自治区", guizhou: "贵州省", hainan: "海南省",
-  hebei: "河北省", heilongjiang: "黑龙江省", henan: "河南省", "hong-kong": "香港特别行政区",
-  hubei: "湖北省", hunan: "湖南省", jiangsu: "江苏省", jiangxi: "江西省", jilin: "吉林省",
-  liaoning: "辽宁省", macau: "澳门特别行政区", "nei-mongol": "内蒙古自治区",
-  "ningxia-hui": "宁夏回族自治区", quinghai: "青海省", shaanxi: "陕西省", shandong: "山东省",
-  shanghai: "上海市", shanxi: "山西省", sichuan: "四川省", tianjin: "天津市",
-  "xinjiang-uygur": "新疆维吾尔自治区", xizang: "西藏自治区", yunnan: "云南省", zhejiang: "浙江省",
-};
-
 const allLevelKeys = dealHeatLevels.map((level) => level.key);
 const heatmapZoomMin = 1;
 const heatmapZoomMax = 1.75;
 const heatmapZoomStep = 0.15;
 const salesCoverageKmPerSvgUnit = 8.5;
-const mapLongitudeOffset = -975.007848;
-const mapLongitudeScale = 13.038228;
-const mapLatitudeOffset = 807.719623;
-const mapMercatorScale = -735.840147;
 const channelPartnerTypes: readonly ChannelPartnerType[] = ["经销商", "代理商", "合作伙伴"];
 const cooperationLevels: readonly CooperationLevel[] = ["一级", "二级", "三级"];
 const channelPartnerColors: Record<ChannelPartnerType, string> = { 经销商: "#15967f", 代理商: "#875bd4", 合作伙伴: "#ffffff" };
@@ -111,16 +97,6 @@ function formatDate(value: string | null): string {
 /** 识别请求取消，避免切换公司或省份时把旧请求误报为错误。 */
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";
-}
-
-/** 复用底图校准后的 Mercator 投影，将城市经纬度转换为 SVG 坐标。 */
-export function projectMapCoordinates(longitude: number, latitude: number): { x: number; y: number } {
-  const latitudeRadians = latitude * Math.PI / 180;
-  const mercatorLatitude = Math.log(Math.tan(Math.PI / 4 + latitudeRadians / 2));
-  return {
-    x: mapLongitudeOffset + mapLongitudeScale * longitude,
-    y: mapLatitudeOffset + mapMercatorScale * mercatorLatitude,
-  };
 }
 
 /** 投影销售常驻点并保留现有覆盖半径表现。 */

@@ -1,4 +1,4 @@
-/** 销售覆盖地图浏览器验收：验证每人一个 Pin、标题白框、月份和双人对比闭环。 */
+/** 销售覆盖地图浏览器验收：验证每人一个 Pin、标题白框、月份/年份和双人对比闭环。 */
 
 import { expect, test } from "@playwright/test";
 
@@ -55,6 +55,10 @@ test("默认三个月显示每人一个 Pin，点击姓名后展开单人详情�
   const detail = page.getByRole("complementary", { name: "张1销售详情" });
   await expect(detail).toBeVisible();
   await expect(detail.getByRole("radio", { name: "3 月" })).toHaveAttribute("aria-checked", "true");
+  const yearSelect = detail.getByLabel("活动年份");
+  const currentYear = new Date().getFullYear();
+  await expect(yearSelect).toHaveValue("");
+  await expect(yearSelect.locator("option")).toHaveText(["年份", `${currentYear} 年`, `${currentYear - 1} 年`, `${currentYear - 2} 年`]);
   await expect(detail.getByText("客户拜访")).toBeVisible();
   await expect(detail.locator(".salesperson-coverage-copy")).toContainText("全国");
   await expect(detail.getByText("成交金额", { exact: false })).toBeVisible();
@@ -70,6 +74,13 @@ test("默认三个月显示每人一个 Pin，点击姓名后展开单人详情�
   expect(focusPadding?.[1]).toBeLessThan(160);
   expect(focusPadding?.[2]).toBeGreaterThan(300);
   expect(focusPadding?.[3]).toBeGreaterThan(390);
+
+  const selectedYear = currentYear - 1;
+  const yearResponse = page.waitForResponse((response) => response.url().includes(`/salespeople/coverage?year=${selectedYear}`) && response.status() === 200);
+  await yearSelect.selectOption(String(selectedYear));
+  await yearResponse;
+  await expect(detail.getByText(`${selectedYear} 年人效详情`)).toBeVisible();
+  await expect(detail.getByRole("radio", { name: "3 月" })).toHaveAttribute("aria-checked", "false");
 
   const sixMonthResponse = page.waitForResponse((response) => response.url().includes("/salespeople/coverage?months=6") && response.status() === 200);
   await detail.getByRole("radio", { name: "6 月" }).click();

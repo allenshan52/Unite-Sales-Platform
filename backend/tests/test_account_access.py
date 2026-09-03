@@ -12,10 +12,12 @@ from fastapi import HTTPException
 
 from app.services.account_access import (
     account_data_scope,
+    competitor_order_location_condition,
     competitor_visibility_condition,
     coverage_scope_is_visible,
     location_is_visible,
     require_location_access,
+    unite_deal_visibility_condition,
 )
 from app.services.organizations import list_organizations
 
@@ -154,3 +156,22 @@ def test_competitor_visibility_requires_site_or_deal_customer_in_scope() -> None
     assert CompetitorDeal.__tablename__ in sql
     assert CompetitorCustomer.__tablename__ in sql
     assert "吉林" in sql
+
+
+def test_order_scope_uses_complete_snapshot_and_only_falls_back_when_missing() -> None:
+    """订单已有完整省市时不得因关联单位在负责范围内而越权；仅双空历史记录允许回退。"""
+
+    data_scope = account_data_scope(_user(_scope(SalesCoverageLevel.province, "吉林", "吉林")))
+    unite_sql = str(unite_deal_visibility_condition(data_scope).compile(
+        dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True},
+    ))
+    competitor_sql = str(competitor_order_location_condition(data_scope).compile(
+        dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True},
+    ))
+
+    for sql in (unite_sql, competitor_sql):
+        assert "province IS NOT NULL" in sql
+        assert "city IS NOT NULL" in sql
+        assert "province IS NULL" in sql
+        assert "city IS NULL" in sql
+        assert "吉林" in sql

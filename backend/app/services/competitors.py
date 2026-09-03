@@ -22,7 +22,6 @@ from app.models import (
     IntelligenceSourceType,
     Organization,
 )
-from app.services.account_access import AccountDataScope, competitor_visibility_condition
 from app.schemas import (
     CompetitorCustomerRead,
     CompetitorDealRead,
@@ -32,6 +31,12 @@ from app.schemas import (
     CompetitorStrengthRegionRead,
     CompetitorSummaryRead,
     PublicOrganizationCompetitorLinkRead,
+)
+from app.services.account_access import (
+    AccountDataScope,
+    competitor_order_is_visible,
+    competitor_visibility_condition,
+    location_is_visible,
 )
 
 REGION_SCORE_WEIGHTS = {
@@ -51,7 +56,12 @@ REGION_LEVELS = (
 )
 
 
-def calculate_competitor_strength_regions(competitor: Competitor) -> list[CompetitorStrengthRegionRead]:
+def calculate_competitor_strength_regions(
+    competitor: Competitor,
+    *,
+    sites: list[CompetitorSite] | None = None,
+    customer_deals: dict[UUID, list[CompetitorDeal]] | None = None,
+) -> list[CompetitorStrengthRegionRead]:
     """按省汇总据点权重、成交单位数和交易额，生成可复算且有证据门槛的竞争区域。"""
 
     activities: dict[str, dict[str, object]] = {}
@@ -69,7 +79,7 @@ def calculate_competitor_strength_regions(competitor: Competitor) -> list[Compet
             },
         )
 
-    for site in competitor.sites:
+    for site in competitor.sites if sites is None else sites:
         activity = activity_for(site.province)
         site_type = site.site_type if isinstance(site.site_type, CompetitorSiteType) else CompetitorSiteType(site.site_type)
         weight = SITE_TYPE_WEIGHTS[site_type]
@@ -77,8 +87,13 @@ def calculate_competitor_strength_regions(competitor: Competitor) -> list[Compet
         activity["site_count"] = activity["site_count"] + 1
 
     for customer in competitor.customers:
+        if customer_deals is not None and customer.id not in customer_deals:
+            continue
+        if not customer.province:
+            continue
         activity = activity_for(customer.province)
-        amount = sum((deal.amount for deal in customer.deals), start=Decimal(0))
+        deals = customer.deals if customer_deals is None else customer_deals[customer.id]
+        amount = sum((deal.amount for deal in deals), start=Decimal(0))
         activity["customer_count"] = activity["customer_count"] + 1
         activity["amount"] = activity["amount"] + amount
 
@@ -139,7 +154,7 @@ def _to_site(site: CompetitorSite) -> CompetitorSiteRead:
     return CompetitorSiteRead.model_validate(site, from_attributes=True)
 
 
-def _to_customer(customer: CompetitorCustomer) -> CompetitorCustomerRead:
+def _to_customer(customer: CompetitorCustomer, deals: list[CompetitorDeal] | None = None) -> CompetitorCustomerRead:
     """组合成交单位、逐笔交易及可选正式单位关联，明确未关联状态。"""
 
     link = customer.organization_link
@@ -164,7 +179,10 @@ def _to_customer(customer: CompetitorCustomer) -> CompetitorCustomerRead:
         linked_organization_name=organization.name if organization else None,
         match_status=link.match_status if link else None,
         match_confidence=link.match_confidence if link else None,
-        deals=[CompetitorDealRead.model_validate(deal, from_attributes=True) for deal in sorted(customer.deals, key=lambda item: item.signed_at or date.min, reverse=True)],
+        deals=[
+            CompetitorDealRead.model_validate(deal, from_attributes=True)
+            for deal in sorted(customer.deals if deals is None else deals, key=lambda item: item.signed_at or date.min, reverse=True)
+        ],
     )
 
 
@@ -183,7 +201,15 @@ def list_public_competitor_map_items(db: Session, data_scope: AccountDataScope) 
     )
     items: list[CompetitorMapItemRead] = []
     for competitor in db.scalars(statement).all():
-        primary_site = next(site for site in competitor.sites if site.is_primary)
+        primary_site = next(
+            (
+                site for site in competitor.sites
+                if site.is_primary and location_is_visible(data_scope, site.province, site.city)
+            ),
+            None,
+        )
+        if primary_site is None:
+            continue
         items.append(CompetitorMapItemRead(
             id=competitor.id,
             name=competitor.name,
@@ -195,12 +221,33 @@ def list_public_competitor_map_items(db: Session, data_scope: AccountDataScope) 
     return items
 
 
-def build_public_competitor_detail(competitor: Competitor) -> CompetitorDetailRead:
-    """从含官网的同行原始记录实时计算成交汇总和有活动证据支持的竞争区域。"""
+def build_public_competitor_detail(
+    competitor: Competitor,
+    data_scope: AccountDataScope | None = None,
+) -> CompetitorDetailRead:
+    """按账号范围裁剪据点、成交单位和逐笔订单，再实时计算公开汇总与竞争区域。"""
 
-    customers = sorted(competitor.customers, key=lambda item: (item.customer_level.value, item.name))
-    deals = [deal for customer in customers for deal in customer.deals]
-    strength_regions = calculate_competitor_strength_regions(competitor)
+    scope = data_scope or AccountDataScope(True, frozenset(), frozenset(), frozenset())
+    sites = [site for site in competitor.sites if location_is_visible(scope, site.province, site.city)]
+    customer_deals = {
+        customer.id: [deal for deal in customer.deals if competitor_order_is_visible(scope, deal, customer)]
+        for customer in competitor.customers
+    }
+    customer_deals = {
+        customer.id: customer_deals[customer.id]
+        for customer in competitor.customers
+        if customer_deals[customer.id] or location_is_visible(scope, customer.province, customer.city)
+    }
+    customers = sorted(
+        (customer for customer in competitor.customers if customer.id in customer_deals),
+        key=lambda item: (item.customer_level.value, item.name),
+    )
+    deals = [deal for customer in customers for deal in customer_deals[customer.id]]
+    strength_regions = calculate_competitor_strength_regions(
+        competitor,
+        sites=sites,
+        customer_deals=customer_deals,
+    )
     return CompetitorDetailRead(
         id=competitor.id,
         name=competitor.name,
@@ -208,7 +255,7 @@ def build_public_competitor_detail(competitor: Competitor) -> CompetitorDetailRe
         color=competitor.color,
         description=competitor.description,
         summary=CompetitorSummaryRead(
-            site_count=len(competitor.sites),
+            site_count=len(sites),
             customer_count=len(customers),
             linked_customer_count=sum(
                 customer.organization_link is not None and customer.organization_link.match_status is CompetitorMatchStatus.confirmed
@@ -218,8 +265,8 @@ def build_public_competitor_detail(competitor: Competitor) -> CompetitorDetailRe
             total_amount=sum((deal.amount for deal in deals), start=Decimal(0)),
             strong_region_count=sum(region.strength_level is CompetitorStrengthLevel.strong for region in strength_regions),
         ),
-        sites=[_to_site(site) for site in sorted(competitor.sites, key=lambda item: (not item.is_primary, item.site_type.value, item.name))],
-        customers=[_to_customer(customer) for customer in customers],
+        sites=[_to_site(site) for site in sorted(sites, key=lambda item: (not item.is_primary, item.site_type.value, item.name))],
+        customers=[_to_customer(customer, customer_deals[customer.id]) for customer in customers],
         strength_regions=strength_regions,
     )
 
@@ -246,7 +293,7 @@ def get_public_competitor_detail(db: Session, competitor_id: UUID, data_scope: A
     )
     if competitor is None:
         raise HTTPException(status_code=404, detail="未找到该同行")
-    return build_public_competitor_detail(competitor)
+    return build_public_competitor_detail(competitor, data_scope)
 
 
 def public_organization_competitor_links(organization: Organization) -> list[PublicOrganizationCompetitorLinkRead]:

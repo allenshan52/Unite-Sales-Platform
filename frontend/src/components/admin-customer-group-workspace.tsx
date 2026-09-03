@@ -5,6 +5,7 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { Building2, Check, CircleAlert, Pencil, Plus, Save, Search, Trash2, X } from "lucide-react";
 
+import { AmapLocationSearch, type AmapLocationSelection } from "@/components/amap-location-search";
 import { apiFetch, queryString, type CustomerGroupProfile, type OpportunityStage } from "@/lib/api";
 import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { useLatestRequest } from "@/hooks/use-latest-request";
@@ -53,7 +54,7 @@ function createDraftKey(): string {
 function emptyUnit(isHeadquarters: boolean, parentDraftKey = ""): UnitDraft {
   return {
     draftKey: createDraftKey(), id: null, parentDraftKey, name: "", isHeadquarters,
-    address: "", province: "", city: "", longitude: "116.4074", latitude: "39.9042",
+    address: "", province: "", city: "", longitude: "", latitude: "",
     isWon: false, actualSalesAmount: "0", opportunityStage: "", estimatedOpportunityAmount: "",
   };
 }
@@ -138,10 +139,25 @@ function CustomerGroupProfileDialog({ profile, onCancel, onSaved }: { profile: C
       .map((unit) => unit.parentDraftKey === target.draftKey ? { ...unit, parentDraftKey: target.parentDraftKey } : unit));
   }
 
+  /** 把高德候选原子写入一个集团单位，保证地址与地图节点始终一致。 */
+  function applyUnitLocation(index: number, location: AmapLocationSelection) {
+    updateField("units", updateUnit(form.units, index, {
+      address: location.address,
+      province: location.province,
+      city: location.city,
+      longitude: location.longitude,
+      latitude: location.latitude,
+    }));
+  }
+
   /** 提交完整档案；失败时保留全部单位草稿供继续修正。 */
   async function submitProfile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setSubmitting(true); setError(null);
-    try { await onSaved(profilePayload(form)); }
+    try {
+      const missingLocation = form.units.find((unit) => !unit.longitude.trim() || !unit.latitude.trim());
+      if (missingLocation) throw new Error(`请先为“${missingLocation.name || (missingLocation.isHeadquarters ? "集团总部" : "未命名分支")}”选择高德位置`);
+      await onSaved(profilePayload(form));
+    }
     catch (submitError) { setError(submitError instanceof Error ? submitError.message : "保存失败，请核对单位层级和金额后重试"); setSubmitting(false); }
   }
 
@@ -155,11 +171,12 @@ function CustomerGroupProfileDialog({ profile, onCancel, onSaved }: { profile: C
           <div className="organization-edit-grid">
             <label className="field-wide"><span>单位名称 *</span><input value={unit.name} onChange={(event) => updateField("units", updateUnit(form.units, index, { name: event.target.value }))} minLength={2} maxLength={255} required /></label>
             {!unit.isHeadquarters ? <label><span>父级单位 *</span><select value={unit.parentDraftKey} onChange={(event) => updateField("units", updateUnit(form.units, index, { parentDraftKey: event.target.value }))} required><option value="">请选择父级</option>{form.units.filter((option) => option.draftKey !== unit.draftKey).map((option) => <option key={option.draftKey} value={option.draftKey}>{option.name || (option.isHeadquarters ? "未命名总部" : "未命名分支")}</option>)}</select></label> : null}
+            <AmapLocationSearch queryHint={unit.name || unit.address} value={{ address: unit.address, longitude: unit.longitude, latitude: unit.latitude }} disabled={submitting} onSelect={(location) => applyUnitLocation(index, location)} />
             <label className="field-wide"><span>详细地址 *</span><input value={unit.address} onChange={(event) => updateField("units", updateUnit(form.units, index, { address: event.target.value }))} minLength={2} maxLength={500} required /></label>
             <label><span>省份 *</span><input value={unit.province} onChange={(event) => updateField("units", updateUnit(form.units, index, { province: event.target.value }))} minLength={2} maxLength={60} required /></label>
             <label><span>城市 *</span><input value={unit.city} onChange={(event) => updateField("units", updateUnit(form.units, index, { city: event.target.value }))} minLength={2} maxLength={60} required /></label>
-            <label><span>经度 *</span><input type="number" step="any" min={72.004} max={137.8347} value={unit.longitude} onChange={(event) => updateField("units", updateUnit(form.units, index, { longitude: event.target.value }))} required /></label>
-            <label><span>纬度 *</span><input type="number" step="any" min={0.8293} max={55.8271} value={unit.latitude} onChange={(event) => updateField("units", updateUnit(form.units, index, { latitude: event.target.value }))} required /></label>
+            <label><span>经度（自动）*</span><input type="number" step="any" min={72.004} max={137.8347} value={unit.longitude} readOnly required /></label>
+            <label><span>纬度（自动）*</span><input type="number" step="any" min={0.8293} max={55.8271} value={unit.latitude} readOnly required /></label>
             <label className="admin-data-checkbox"><input type="checkbox" checked={unit.isWon} onChange={(event) => updateField("units", updateUnit(form.units, index, { isWon: event.target.checked, actualSalesAmount: event.target.checked ? unit.actualSalesAmount : "0" }))} /><span>该单位已成交</span></label>
             <label><span>实际销售额（元）*</span><input type="number" step="0.01" min={unit.isWon ? 0.01 : 0} value={unit.actualSalesAmount} onChange={(event) => updateField("units", updateUnit(form.units, index, { actualSalesAmount: event.target.value }))} disabled={!unit.isWon} required /></label>
             <label><span>商机阶段</span><select value={unit.opportunityStage} onChange={(event) => updateField("units", updateUnit(form.units, index, { opportunityStage: event.target.value as OpportunityStage | "" }))}><option value="">暂无商机</option>{opportunityStages.map((stage) => <option key={stage}>{stage}</option>)}</select></label>

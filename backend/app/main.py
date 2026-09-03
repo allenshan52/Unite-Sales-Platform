@@ -19,6 +19,7 @@ from app.routers import (
     deal_heatmap,
     health,
     insights,
+    location_search,
     organizations,
     sales_office_locations,
     salespeople,
@@ -44,6 +45,7 @@ app.include_router(admin_data.router, prefix="/api/v1")
 app.include_router(admin_deals.router, prefix="/api/v1")
 app.include_router(admin_salespeople.router, prefix="/api/v1")
 app.include_router(admin_typical_cases.router, prefix="/api/v1")
+app.include_router(location_search.router, prefix="/api/v1")
 viewer_dependencies = [Depends(get_current_user)]
 app.include_router(organizations.public_router, prefix="/api/v1", dependencies=viewer_dependencies)
 app.include_router(organizations.router, prefix="/api/v1")

@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     admin_login_max_attempts: int = Field(default=5, ge=3, le=20)
     admin_login_lock_seconds: int = Field(default=900, ge=60, le=86_400)
     amap_rest_api_key: str | None = None
+    amap_service_base_url: str = "https://restapi.amap.com"
     app_port: int = 3100
     cors_origins: str = "http://localhost:3100"
     typical_case_media_dir: Path = Path("/case-media")

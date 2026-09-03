@@ -37,11 +37,11 @@ def _validate_salesperson(db: Session, salesperson_id: UUID | None) -> None:
 
 
 def _get_authorized_user(db: Session, user_id: UUID, *, for_update: bool = False) -> AdminUser:
-    """按需锁定并预加载一个账号及范围，不存在时返回中文 404。"""
+    """按需锁定账号主行并分批预加载可空销售关系，避免 PostgreSQL 锁定外连接失败。"""
 
     statement = select(AdminUser).options(
         selectinload(AdminUser.coverage_scopes),
-        joinedload(AdminUser.salesperson),
+        selectinload(AdminUser.salesperson),
     ).where(AdminUser.id == user_id)
     if for_update:
         statement = statement.with_for_update()

@@ -5,6 +5,7 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { Check, CircleAlert, Pencil, Plus, Save, Search, Trash2, X } from "lucide-react";
 
+import { AmapLocationSearch, type AmapLocationSelection } from "@/components/amap-location-search";
 import {
   apiFetch,
   queryString,
@@ -80,7 +81,7 @@ function emptyActivity(): ActivityDraft {
 /** 从空白默认值或服务端完整档案创建隔离表单。 */
 function initialForm(profile: SalespersonProfile | null): ProfileForm {
   if (!profile) {
-    return { employeeCode: "", displayName: "", color: "#2878B5", centerLongitude: "116.4074", centerLatitude: "39.9042", isActive: true, coverageScopes: [], activities: [] };
+    return { employeeCode: "", displayName: "", color: "#2878B5", centerLongitude: "", centerLatitude: "", isActive: true, coverageScopes: [], activities: [] };
   }
   return {
     employeeCode: profile.employee_code,
@@ -150,12 +151,22 @@ function SalespersonProfileDialog({ profile, onCancel, onSaved }: { profile: Sal
     setForm((current) => ({ ...current, [field]: value }));
   }
 
+  /** 用高德候选更新销售地图 Pin；经纬度仍可人工校正。 */
+  function applyPinLocation(location: AmapLocationSelection): void {
+    setForm((current) => ({
+      ...current,
+      centerLongitude: location.longitude,
+      centerLatitude: location.latitude,
+    }));
+  }
+
   /** 提交完整档案；失败时保留所有内嵌草稿供继续修正。 */
   async function submitProfile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSubmitting(true);
     setError(null);
     try {
+      if (!form.centerLongitude.trim() || !form.centerLatitude.trim()) throw new Error("请填写销售地图 Pin 的经纬度");
       await onSaved(profilePayload(form));
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : "保存失败，请核对字段后重试");
@@ -169,6 +180,14 @@ function SalespersonProfileDialog({ profile, onCancel, onSaved }: { profile: Sal
         <header><div><span>销售人员完整档案</span><h2 id="salesperson-profile-title">{profile ? `管理 ${profile.display_name}` : "添加销售人员"}</h2><p>覆盖范围与销售活动随人员档案一起保存</p></div><button type="button" onClick={onCancel} disabled={submitting} aria-label="关闭销售人员档案"><X size={19} /></button></header>
         <div className="organization-edit-body">
           <section><h3>基本信息与地图 Pin</h3><div className="organization-edit-grid">
+            <AmapLocationSearch
+              label="销售 Pin 所在地搜索"
+              description="选择地点后仅自动填写销售 Pin 经纬度"
+              queryHint={form.displayName}
+              value={{ address: "销售 Pin 所在地", longitude: form.centerLongitude, latitude: form.centerLatitude }}
+              disabled={submitting}
+              onSelect={applyPinLocation}
+            />
             <label><span>员工编号 *</span><input value={form.employeeCode} onChange={(event) => updateField("employeeCode", event.target.value)} maxLength={40} required autoFocus /></label>
             <label><span>姓名 *</span><input value={form.displayName} onChange={(event) => updateField("displayName", event.target.value)} minLength={2} maxLength={120} required /></label>
             <label><span>展示颜色 *</span><input type="color" value={form.color} onChange={(event) => updateField("color", event.target.value)} required /></label>

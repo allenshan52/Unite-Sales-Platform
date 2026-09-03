@@ -1,4 +1,4 @@
-"""销售覆盖公开查询服务：按统一滚动月份聚合活动、成交和储备金额。"""
+"""销售覆盖公开查询服务：按滚动月份或自然年聚合活动、成交和储备金额。"""
 
 from calendar import monthrange
 from collections import defaultdict
@@ -35,16 +35,28 @@ def month_cutoff(now: datetime, months: int) -> datetime:
     return now.replace(year=year, month=month, day=min(now.day, monthrange(year, month)[1]))
 
 
+def activity_period_bounds(now: datetime, months: int | None, year: int | None) -> tuple[datetime, datetime]:
+    """把滚动月份或自然年转换为左闭右开的已发生时间边界。"""
+
+    if year is not None:
+        year_end = datetime(year + 1, 1, 1, tzinfo=UTC)
+        return datetime(year, 1, 1, tzinfo=UTC), min(year_end, now)
+    if months is None:
+        raise ValueError("月份和年份必须至少提供一项")
+    return month_cutoff(now, months), now
+
+
 def list_public_salesperson_coverage(
     db: Session,
-    months: int,
+    months: int | None,
     *,
+    year: int | None = None,
     salesperson_id: UUID | None = None,
     now: datetime | None = None,
 ) -> list[SalespersonCoverageRead]:
-    """一次返回授权销售和所选期间汇总；个人账号查询固定到关联销售 ID。"""
+    """一次返回授权销售和所选活动期间汇总；个人账号查询固定到关联销售 ID。"""
 
-    cutoff = month_cutoff(now or datetime.now(UTC), months)
+    period_start, period_end = activity_period_bounds(now or datetime.now(UTC), months, year)
     salesperson_statement = (
         select(Salesperson)
         .options(selectinload(Salesperson.coverage_scopes))
@@ -54,33 +66,44 @@ def list_public_salesperson_coverage(
     if salesperson_id is not None:
         salesperson_statement = salesperson_statement.where(Salesperson.id == salesperson_id)
     salespeople = db.scalars(salesperson_statement).all()
+    if not salespeople:
+        return []
+
+    activity_statement = (
+        select(SalesActivity.salesperson_id, SalesActivity.activity_type, func.count(SalesActivity.id))
+        .where(SalesActivity.occurred_at >= period_start, SalesActivity.occurred_at < period_end)
+        .group_by(SalesActivity.salesperson_id, SalesActivity.activity_type)
+    )
+    if salesperson_id is not None:
+        activity_statement = activity_statement.where(SalesActivity.salesperson_id == salesperson_id)
 
     activity_counts: dict[object, dict[SalesActivityType, int]] = defaultdict(dict)
-    for salesperson_id, activity_type, count in db.execute(
-        select(SalesActivity.salesperson_id, SalesActivity.activity_type, func.count(SalesActivity.id))
-        .where(SalesActivity.occurred_at >= cutoff)
-        .group_by(SalesActivity.salesperson_id, SalesActivity.activity_type)
-    ):
-        activity_counts[salesperson_id][activity_type] = count
+    for activity_salesperson_id, activity_type, count in db.execute(activity_statement):
+        activity_counts[activity_salesperson_id][activity_type] = count
 
-    project_totals = {
-        salesperson_id: (count, amount or Decimal(0))
-        for salesperson_id, count, amount in db.execute(
-            select(SalesProject.salesperson_id, func.count(SalesProject.id), func.sum(SalesProject.contract_amount))
-            .where(SalesProject.salesperson_id.is_not(None))
-            .group_by(SalesProject.salesperson_id)
+    project_statement = (
+        select(SalesProject.salesperson_id, func.count(SalesProject.id), func.sum(SalesProject.contract_amount))
+        .where(SalesProject.salesperson_id.is_not(None))
+        .group_by(SalesProject.salesperson_id)
+    )
+    pipeline_statement = (
+        select(Opportunity.salesperson_id, func.count(Opportunity.id), func.sum(Opportunity.estimated_amount))
+        .where(
+            Opportunity.salesperson_id.is_not(None),
+            Opportunity.stage != OpportunityStage.closed_lost,
         )
+        .group_by(Opportunity.salesperson_id)
+    )
+    if salesperson_id is not None:
+        project_statement = project_statement.where(SalesProject.salesperson_id == salesperson_id)
+        pipeline_statement = pipeline_statement.where(Opportunity.salesperson_id == salesperson_id)
+    project_totals = {
+        project_salesperson_id: (count, amount or Decimal(0))
+        for project_salesperson_id, count, amount in db.execute(project_statement)
     }
     pipeline_totals = {
-        salesperson_id: (count, amount or Decimal(0))
-        for salesperson_id, count, amount in db.execute(
-            select(Opportunity.salesperson_id, func.count(Opportunity.id), func.sum(Opportunity.estimated_amount))
-            .where(
-                Opportunity.salesperson_id.is_not(None),
-                Opportunity.stage != OpportunityStage.closed_lost,
-            )
-            .group_by(Opportunity.salesperson_id)
-        )
+        pipeline_salesperson_id: (count, amount or Decimal(0))
+        for pipeline_salesperson_id, count, amount in db.execute(pipeline_statement)
     }
 
     result: list[SalespersonCoverageRead] = []
@@ -111,6 +134,7 @@ def list_public_salesperson_coverage(
             ],
             performance=SalespersonPerformanceRead(
                 period_months=months,
+                period_year=year,
                 activities=SalespersonActivitySummaryRead(
                     visits=visits,
                     demonstrations=demonstrations,

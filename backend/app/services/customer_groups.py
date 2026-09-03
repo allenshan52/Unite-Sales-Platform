@@ -5,7 +5,7 @@ from decimal import Decimal
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import and_, exists, select
+from sqlalchemy import and_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models import CustomerGroup, CustomerGroupUnit, OpportunityStage
@@ -15,7 +15,7 @@ from app.schemas import (
     CustomerGroupSummaryRead,
     CustomerGroupUnitRead,
 )
-from app.services.account_access import AccountDataScope, location_condition, location_is_visible
+from app.services.account_access import AccountDataScope, customer_group_visibility_condition, location_is_visible
 
 
 def _to_public_unit(unit: CustomerGroupUnit, level: int) -> CustomerGroupUnitRead:
@@ -34,7 +34,7 @@ def list_public_customer_group_headquarters(
     db: Session,
     data_scope: AccountDataScope | None = None,
 ) -> list[CustomerGroupHeadquartersRead]:
-    """只查询账号范围内集团总部，控制首页默认地图载荷和区域边界。"""
+    """查询任一单位命中账号范围的集团，并保留总部作为关系树锚点。"""
 
     if data_scope is None:
         data_scope = AccountDataScope(True, frozenset(), frozenset(), frozenset())
@@ -42,7 +42,7 @@ def list_public_customer_group_headquarters(
     statement = (
         select(CustomerGroup, CustomerGroupUnit)
         .join(CustomerGroupUnit, and_(CustomerGroupUnit.group_id == CustomerGroup.id, CustomerGroupUnit.is_headquarters.is_(True)))
-        .where(location_condition(CustomerGroupUnit.province, CustomerGroupUnit.city, data_scope))
+        .where(customer_group_visibility_condition(data_scope))
         .order_by(CustomerGroup.name)
     )
     return [
@@ -128,15 +128,10 @@ def get_public_customer_group_detail(
 
     if data_scope is None:
         data_scope = AccountDataScope(True, frozenset(), frozenset(), frozenset())
-    visible_headquarters = exists(select(1).where(
-        CustomerGroupUnit.group_id == CustomerGroup.id,
-        CustomerGroupUnit.is_headquarters.is_(True),
-        location_condition(CustomerGroupUnit.province, CustomerGroupUnit.city, data_scope),
-    ))
     group = db.scalar(
         select(CustomerGroup)
         .options(selectinload(CustomerGroup.units))
-        .where(CustomerGroup.id == group_id, visible_headquarters)
+        .where(CustomerGroup.id == group_id, customer_group_visibility_condition(data_scope))
     )
     if group is None:
         raise HTTPException(status_code=404, detail="未找到该客户集团")

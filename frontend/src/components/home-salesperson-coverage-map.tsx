@@ -1,6 +1,6 @@
 "use client";
 
-/** 第五地图：绘制销售位置 Pin，并承载单人详情、双人对比和月份切换。 */
+/** 第五地图：绘制销售位置 Pin，并承载单人详情、双人对比及月份/年份切换。 */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 
@@ -36,6 +36,12 @@ type LoadStatus = "loading" | "ready" | "error";
 const periods: SalespersonPeriodMonths[] = [1, 3, 6, 12];
 const defaultPeriod: SalespersonPeriodMonths = 3;
 const currencyFormatter = new Intl.NumberFormat("zh-CN", { style: "currency", currency: "CNY", maximumFractionDigits: 0 });
+
+/** 年份菜单始终提供当前年及前两年，避免跨年后继续显示过期的固定年份。 */
+function recentActivityYears(): number[] {
+  const currentYear = new Date().getFullYear();
+  return [currentYear, currentYear - 1, currentYear - 2];
+}
 
 /** 格式化数据库 Decimal 字符串，金额缺失时仍稳定显示人民币零元。 */
 function formatCurrency(value: string): string {
@@ -85,23 +91,30 @@ function SalesIcon({ name, size = 17 }: { name: "people" | "close" | "compare" |
   return <svg aria-hidden="true" viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
 }
 
-/** 详情内的活动时间范围控件只改变活动强度口径，成交与储备继续使用当前累计值。 */
-function SalespersonPeriodBar({ period, loading, onChange }: { period: SalespersonPeriodMonths; loading: boolean; onChange: (months: SalespersonPeriodMonths) => void }) {
+/** 详情内统一切换滚动月份或自然年；成交与储备继续使用当前累计值。 */
+function SalespersonPeriodBar({ period, year, loading, onMonthChange, onYearChange }: { period: SalespersonPeriodMonths; year: number | null; loading: boolean; onMonthChange: (months: SalespersonPeriodMonths) => void; onYearChange: (year: number) => void }) {
   return (
-    <div className="salesperson-detail-period" role="radiogroup" aria-label="活动统计时间范围" aria-busy={loading}>
+    <div className="salesperson-detail-period" role="group" aria-label="活动统计时间范围" aria-busy={loading}>
       <span>活动时间范围</span>
-      {periods.map((months) => <button key={months} type="button" role="radio" aria-checked={period === months} className={period === months ? "selected" : ""} disabled={loading} onClick={() => onChange(months)}>{months} 月</button>)}
+      <div className="salesperson-period-months" role="radiogroup" aria-label="滚动月份">
+        {periods.map((months) => <button key={months} type="button" role="radio" aria-checked={year === null && period === months} className={year === null && period === months ? "selected" : ""} disabled={loading} onClick={() => onMonthChange(months)}>{months} 月</button>)}
+      </div>
+      <select className={year === null ? "" : "selected"} aria-label="活动年份" value={year ?? ""} disabled={loading} onChange={(event) => onYearChange(Number(event.target.value))}>
+        <option value="" disabled>年份</option>
+        {recentActivityYears().map((optionYear) => <option key={optionYear} value={optionYear}>{optionYear} 年</option>)}
+      </select>
     </div>
   );
 }
 
 /** 单人详情按需求 6.2 展示负责区域、活动明细、成交和储备金额。 */
-function SalespersonDetail({ person, period, loading, onPeriodChange, onClose }: { person: SalespersonCoverage; period: SalespersonPeriodMonths; loading: boolean; onPeriodChange: (months: SalespersonPeriodMonths) => void; onClose: () => void }) {
+function SalespersonDetail({ person, period, year, loading, onPeriodChange, onYearChange, onClose }: { person: SalespersonCoverage; period: SalespersonPeriodMonths; year: number | null; loading: boolean; onPeriodChange: (months: SalespersonPeriodMonths) => void; onYearChange: (year: number) => void; onClose: () => void }) {
   const metrics = person.performance;
+  const periodLabel = metrics.period_year === null ? `最近 ${metrics.period_months} 个月` : `${metrics.period_year} 年`;
   return (
     <aside className="salesperson-detail-panel" aria-label={`${person.display_name}销售详情`} style={{ "--sales-color": person.color } as CSSProperties}>
       <header>
-        <div><i /><h2>{person.display_name}</h2><p>最近 {metrics.period_months} 个月人效详情</p></div>
+        <div><i /><h2>{person.display_name}</h2><p>{periodLabel}人效详情</p></div>
         <button type="button" aria-label="关闭销售详情" onClick={onClose}><SalesIcon name="close" /></button>
       </header>
       <section className="salesperson-coverage-copy"><h3>负责区域</h3><p>{formatCoverageScopes(person)}</p></section>
@@ -109,7 +122,7 @@ function SalespersonDetail({ person, period, loading, onPeriodChange, onClose }:
         <div><span>成交金额 · {metrics.project_count} 个项目</span><strong>{formatCurrency(metrics.actual_sales_amount)}</strong></div>
         <div><span>储备金额 · {metrics.active_opportunity_count} 个项目</span><strong>{formatCurrency(metrics.pipeline_amount)}</strong></div>
       </section>
-      <SalespersonPeriodBar period={period} loading={loading} onChange={onPeriodChange} />
+      <SalespersonPeriodBar period={period} year={year} loading={loading} onMonthChange={onPeriodChange} onYearChange={onYearChange} />
       <section className="salesperson-activity-block">
         <div><h3>活动强度</h3><strong>{metrics.activities.total}<small> 次</small></strong></div>
         <dl>
@@ -123,11 +136,11 @@ function SalespersonDetail({ person, period, loading, onPeriodChange, onClose }:
 }
 
 /** 双人对比复用单人指标结构，以左右两列保留直接可扫读的同口径差异。 */
-function SalespersonComparison({ people, period, loading, onPeriodChange, onClose }: { people: [SalespersonCoverage, SalespersonCoverage]; period: SalespersonPeriodMonths; loading: boolean; onPeriodChange: (months: SalespersonPeriodMonths) => void; onClose: () => void }) {
+function SalespersonComparison({ people, period, year, loading, onPeriodChange, onYearChange, onClose }: { people: [SalespersonCoverage, SalespersonCoverage]; period: SalespersonPeriodMonths; year: number | null; loading: boolean; onPeriodChange: (months: SalespersonPeriodMonths) => void; onYearChange: (year: number) => void; onClose: () => void }) {
   return (
     <aside className="salesperson-detail-panel salesperson-compare-panel" aria-label={`${people[0].display_name}与${people[1].display_name}人效对比`}>
       <header><div><h2>销售人效对比</h2><p>活动按所选月份 · 金额按当前累计/储备口径</p></div><button type="button" aria-label="关闭销售对比" onClick={onClose}><SalesIcon name="close" /></button></header>
-      <SalespersonPeriodBar period={period} loading={loading} onChange={onPeriodChange} />
+      <SalespersonPeriodBar period={period} year={year} loading={loading} onMonthChange={onPeriodChange} onYearChange={onYearChange} />
       <div className="salesperson-compare-grid">
         {people.map((person) => (
           <article key={person.id} style={{ "--sales-color": person.color } as CSSProperties}>
@@ -152,6 +165,7 @@ export function HomeSalespersonCoverageMap() {
   const runtimeRef = useRef<Runtime | null>(null);
   const [mapReady, setMapReady] = useState(false);
   const [period, setPeriod] = useState<SalespersonPeriodMonths>(defaultPeriod);
+  const [periodYear, setPeriodYear] = useState<number | null>(null);
   const [people, setPeople] = useState<SalespersonCoverage[]>([]);
   const [dataStatus, setDataStatus] = useState<LoadStatus>("loading");
   const [mapStatus, setMapStatus] = useState<LoadStatus>("loading");
@@ -180,11 +194,12 @@ export function HomeSalespersonCoverageMap() {
 
   /** 每次开始新的单人或对比查看都恢复三个月口径，避免上一次临时筛选泄漏到下一次查看。 */
   const resetPeriodToDefault = useCallback(() => {
-    if (period === defaultPeriod) return;
+    if (period === defaultPeriod && periodYear === null) return;
     setDataStatus("loading");
     setDataMessage(null);
     setPeriod(defaultPeriod);
-  }, [period]);
+    setPeriodYear(null);
+  }, [period, periodYear]);
 
   /** 关闭详情和对比，恢复全国销售覆盖视图和默认三个月口径。 */
   const resetView = useCallback(() => {
@@ -226,10 +241,19 @@ export function HomeSalespersonCoverageMap() {
 
   /** 在用户动作内进入加载态，effect 仅负责同步后端请求。 */
   function changePeriod(months: SalespersonPeriodMonths) {
-    if (months === period) return;
+    if (months === period && periodYear === null) return;
     setDataStatus("loading");
     setDataMessage(null);
     setPeriod(months);
+    setPeriodYear(null);
+  }
+
+  /** 选择自然年后关闭滚动月份选中态，并立即请求该完整年份的活动。 */
+  function changeYear(year: number) {
+    if (year === periodYear) return;
+    setDataStatus("loading");
+    setDataMessage(null);
+    setPeriodYear(year);
   }
 
   /** 只有选满两人才能进入对比，并从三个月活动数据开始展示。 */
@@ -257,7 +281,8 @@ export function HomeSalespersonCoverageMap() {
 
   useEffect(() => {
     const controller = new AbortController();
-    apiFetch<SalespersonCoverage[]>(`/public/salespeople/coverage?months=${period}`, { signal: controller.signal })
+    const query = periodYear === null ? `months=${period}` : `year=${periodYear}`;
+    apiFetch<SalespersonCoverage[]>(`/public/salespeople/coverage?${query}`, { signal: controller.signal, cache: "no-store" })
       .then((data) => {
         setPeople(data);
         setDataStatus("ready");
@@ -269,7 +294,7 @@ export function HomeSalespersonCoverageMap() {
         setDataMessage(error instanceof Error ? error.message : "销售覆盖数据加载失败");
       });
     return () => controller.abort();
-  }, [dataAttempt, period]);
+  }, [dataAttempt, period, periodYear]);
 
   useEffect(() => {
     let disposed = false;
@@ -365,8 +390,8 @@ export function HomeSalespersonCoverageMap() {
       </section>
       {mapReady ? <div className={`salesperson-map-zoom ${activePerson || comparedPeople ? "has-panel" : ""}`} role="group" aria-label="地图缩放"><button type="button" aria-label="放大地图" onClick={() => runtimeRef.current?.map.zoomIn()}>＋</button><button type="button" aria-label="缩小地图" onClick={() => runtimeRef.current?.map.zoomOut()}>−</button></div> : null}
       {stateStatus !== "ready" ? <div className="salesperson-map-state" aria-live="polite"><SalesIcon name="people" size={22} /><strong>{stateStatus === "loading" ? "正在读取销售覆盖" : stateStatus === "error" ? "销售覆盖地图暂不可用" : "暂无销售覆盖数据"}</strong><span>{stateStatus === "loading" ? "正在汇总活动、成交与储备项目" : stateMessage ?? "请先维护销售人员及负责范围"}</span>{stateStatus === "error" ? <button type="button" onClick={retryLoad}>重新加载</button> : null}</div> : null}
-      {activePerson ? <SalespersonDetail person={activePerson} period={period} loading={dataStatus === "loading"} onPeriodChange={changePeriod} onClose={resetView} /> : null}
-      {comparedPeople ? <SalespersonComparison people={comparedPeople} period={period} loading={dataStatus === "loading"} onPeriodChange={changePeriod} onClose={resetView} /> : null}
+      {activePerson ? <SalespersonDetail person={activePerson} period={period} year={periodYear} loading={dataStatus === "loading"} onPeriodChange={changePeriod} onYearChange={changeYear} onClose={resetView} /> : null}
+      {comparedPeople ? <SalespersonComparison people={comparedPeople} period={period} year={periodYear} loading={dataStatus === "loading"} onPeriodChange={changePeriod} onYearChange={changeYear} onClose={resetView} /> : null}
     </div>
   );
 }

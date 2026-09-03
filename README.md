@@ -20,7 +20,7 @@ Set-Location -LiteralPath 'D:\桌面\优纳特销售网站'
 - Docker Compose：PostGIS 16、Redis、FastAPI、Next.js 和 Nginx 网关；数据库不发布到主机端口。
 - 首版 Alembic 迁移：`organization`、`organization_site`、`organization_evidence`、`organization_contact`、`opportunity`、`sales_project`、导入批次、重复候选和审核日志。
 - 高校/研究院必须有纳入证据；体育高校可标记体育例外；新单位默认“潜在客户 + 待核验”。
-- `/`：公司内部授权账号登录后查看全国地图、单位数据库和数据洞察；未登录时不挂载业务页面且业务 API 返回 401。
+- `/`：公司内部授权账号登录后查看全国单位地图和数据洞察；单位数据库仅保留在数据后台，未登录时不挂载业务页面且业务 API 返回 401。
 - `/admin/organizations`：管理员维护业务数据和“普通员工 / 管理员”授权账号；支持筛选、核验、高德 `MarkerCluster` 地图及 Excel 导出。
 
 ## 首次配置
@@ -32,8 +32,8 @@ Set-Location -LiteralPath 'D:\桌面\优纳特销售网站'
 POSTGRES_DB=unite_map
 POSTGRES_USER=unite
 POSTGRES_PASSWORD=使用密码管理器生成的随机密码
-APP_PORT=3100
-CORS_ORIGINS=http://localhost:3100
+APP_PORT=33100
+CORS_ORIGINS=http://localhost:33100
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=至少16位随机密码
 APP_ENVIRONMENT=development
@@ -42,7 +42,7 @@ AMAP_WEB_KEY=高德Web端JSAPI Key
 AMAP_SECURITY_JS_CODE=高德安全密钥
 ```
 
-`APP_PORT=3100` 用于避免占用已有本机 Next.js 开发服务器的 3000 端口。`CORS_ORIGINS` 必须与浏览器实际入口完全一致，正式环境填写完整 HTTPS 域名。高德安全密钥仅进入 Nginx 服务端代理，浏览器代码不会读取它。本地 HTTP 保持 `APP_ENVIRONMENT=development` 与 `ADMIN_COOKIE_SECURE=false`；正式 HTTPS 环境改为 `APP_ENVIRONMENT=production` 和 `ADMIN_COOKIE_SECURE=true`，否则 API 会拒绝启动。连接池、查询超时和登录锁定的生产参数见 `.env.example`，默认值适合单 API 实例。
+`APP_PORT=33100` 用于避开本机 Next.js 开发端口及 Windows 保留端口段。`CORS_ORIGINS` 必须与浏览器实际入口完全一致，正式环境填写完整 HTTPS 域名。高德安全密钥仅进入 Nginx 服务端代理，浏览器代码不会读取它。本地 HTTP 保持 `APP_ENVIRONMENT=development` 与 `ADMIN_COOKIE_SECURE=false`；正式 HTTPS 环境改为 `APP_ENVIRONMENT=production` 和 `ADMIN_COOKIE_SECURE=true`，否则 API 会拒绝启动。连接池、查询超时和登录锁定的生产参数见 `.env.example`，默认值适合单 API 实例。
 
 ## 启动与检查
 

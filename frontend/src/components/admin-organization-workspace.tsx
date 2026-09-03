@@ -8,8 +8,8 @@ import Link from "next/link";
 import { Archive, ArrowLeft, Check, CircleAlert, Download, LogOut, MapPinned, Pencil, Plus, RotateCcw, Save, Search, Trash2, Users, X } from "lucide-react";
 
 import { AccessLoginPanel } from "@/components/access-login-panel";
+import { AmapLocationSearch, type AmapLocationSelection } from "@/components/amap-location-search";
 import { AdminOrganizationMap } from "@/components/admin-organization-map";
-import { AdminProductItemsEditor, emptyProductItem, productItemFromApi, type ProductItemDraft } from "@/components/admin-product-items-editor";
 import { ADMIN_SECTION_TABS, type AdminSection } from "@/lib/admin-data-config";
 import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { useLatestRequest } from "@/hooks/use-latest-request";
@@ -37,7 +37,6 @@ import {
 
 const AdminDataWorkspace = dynamic(() => import("@/components/admin-data-workspace").then((module) => module.AdminDataWorkspace), { loading: AdminDataWorkspaceLoading });
 const AdminDealWorkspace = dynamic(() => import("@/components/admin-deal-workspace").then((module) => module.AdminDealWorkspace), { loading: AdminDataWorkspaceLoading });
-const AdminCompetitorWorkspace = dynamic(() => import("@/components/admin-competitor-workspace").then((module) => module.AdminCompetitorWorkspace), { loading: AdminDataWorkspaceLoading });
 const AdminCustomerGroupWorkspace = dynamic(() => import("@/components/admin-customer-group-workspace").then((module) => module.AdminCustomerGroupWorkspace), { loading: AdminDataWorkspaceLoading });
 const AdminSalesWorkspace = dynamic(() => import("@/components/admin-sales-workspace").then((module) => module.AdminSalesWorkspace), { loading: AdminDataWorkspaceLoading });
 const AdminTypicalCaseWorkspace = dynamic(() => import("@/components/admin-typical-case-workspace").then((module) => module.AdminTypicalCaseWorkspace), { loading: AdminDataWorkspaceLoading });
@@ -46,7 +45,6 @@ const AdminAccountWorkspace = dynamic(() => import("@/components/admin-account-w
 type Filters = { search: string; type: string; customerStatus: string; reviewStatus: string; province: string; verifiedOnly: boolean; archivedOnly: boolean };
 type BatchIntent = "review" | "archive" | "restore";
 type ContactEditForm = { draftKey: string; id: string | null; name: string; department: string; title: string; mobile: string; email: string; isPrimary: boolean; isActive: boolean; notes: string };
-type SalesProjectEditForm = { draftKey: string; id: string | null; opportunityId: string; salespersonId: string; name: string; contractAmount: string; supplierName: string; province: string; city: string; signedAt: string; projectDetail: string; products: ProductItemDraft[] };
 type OpportunityEditForm = { draftKey: string; id: string | null; title: string; stage: OpportunityStage; estimatedAmount: string; aiSummary: string; nextAction: string; nextActionAt: string };
 type EvidenceCreateForm = { draftKey: string; evidenceKind: EvidenceKind; title: string; sourceUrl: string; publishedAt: string; excerpt: string };
 type OrganizationEditForm = {
@@ -67,7 +65,6 @@ type OrganizationEditForm = {
   cooperationLevel: CooperationLevel | "";
   notes: string;
   contacts: ContactEditForm[];
-  salesProjects: SalesProjectEditForm[];
   opportunities: OpportunityEditForm[];
   evidences: EvidenceCreateForm[];
   siteName: string;
@@ -126,11 +123,6 @@ function emptyContact(): ContactEditForm {
   return { draftKey: draftKey(), id: null, name: "", department: "", title: "", mobile: "", email: "", isPrimary: false, isActive: true, notes: "" };
 }
 
-/** 创建空成交项目草稿，并用单位主地点预填订单省市以减少重复录入。 */
-function emptySalesProject(province = "", city = ""): SalesProjectEditForm {
-  return { draftKey: draftKey(), id: null, opportunityId: "", salespersonId: "", name: "", contractAmount: "", supplierName: "", province, city, signedAt: "", projectDetail: "", products: [emptyProductItem()] };
-}
-
 /** 创建空商机草稿，并使用最早推进阶段作为默认值。 */
 function emptyOpportunity(): OpportunityEditForm {
   return { draftKey: draftKey(), id: null, title: "", stage: "已识别", estimatedAmount: "", aiSummary: "", nextAction: "", nextActionAt: "" };
@@ -147,7 +139,7 @@ function emptyOrganizationForm(): OrganizationEditForm {
     name: "", organizationType: "", industry: "", customerStatus: "潜在客户", reviewStatus: "待核验",
     inclusionReason: "", isSportsException: false, parentGroup: "", website: "", unifiedSocialCreditCode: "",
     recentFollowUpAt: "", recentFollowUpContent: "", followUpOwner: "", cooperationIntent: "", cooperationLevel: "", notes: "",
-    contacts: [], salesProjects: [], opportunities: [], evidences: [], siteName: "", rawAddress: "", address: "",
+    contacts: [], opportunities: [], evidences: [], siteName: "", rawAddress: "", address: "",
     province: "", city: "", district: "", amapAdcode: "", geocodeStatus: "待编码", geocodeConfidence: "", longitude: "", latitude: "",
   };
 }
@@ -185,14 +177,6 @@ function editFormFromOrganization(organization: Organization): OrganizationEditF
     contacts: (organization.contacts ?? []).map((contact) => ({
       draftKey: contact.id, id: contact.id, name: contact.name, department: contact.department ?? "", title: contact.title ?? "",
       mobile: contact.mobile ?? "", email: contact.email ?? "", isPrimary: contact.is_primary, isActive: contact.is_active, notes: contact.notes ?? "",
-    })),
-    salesProjects: (organization.sales_projects ?? []).map((project) => ({
-      draftKey: project.id, id: project.id, opportunityId: project.opportunity_id ?? "", name: project.name,
-      salespersonId: project.salesperson_id ?? "", contractAmount: project.contract_amount, supplierName: project.supplier_name ?? "",
-      province: project.province ?? "", city: project.city ?? "", signedAt: project.signed_at ?? "", projectDetail: project.project_detail ?? "",
-      products: project.products?.length
-        ? project.products.map((product) => productItemFromApi(product as unknown as Record<string, unknown>))
-        : (project.unit_price || project.quantity || project.specification_model ? [productItemFromApi({ id: null, product_name: project.name, specification_model: project.specification_model, unit_price: project.unit_price, quantity: project.quantity, line_total: project.contract_amount })] : []),
     })),
     opportunities: (organization.opportunities ?? []).map((opportunity) => ({
       draftKey: opportunity.id, id: opportunity.id, title: opportunity.title, stage: opportunity.stage,
@@ -238,17 +222,6 @@ function updatePayloadFromForm(form: OrganizationEditForm): OrganizationUpdateIn
       id: contact.id, name: contact.name.trim(), department: optionalText(contact.department), title: optionalText(contact.title),
       mobile: optionalText(contact.mobile), email: optionalText(contact.email), is_primary: contact.isPrimary,
       is_active: contact.isActive, notes: optionalText(contact.notes),
-    })),
-    sales_projects: form.salesProjects.map((project) => ({
-      id: project.id, opportunity_id: optionalText(project.opportunityId), salesperson_id: optionalText(project.salespersonId), name: project.name.trim(),
-      contract_amount: Number(project.contractAmount), supplier_name: optionalText(project.supplierName),
-      unit_price: optionalNumber(project.products[0]?.unitPrice ?? ""), quantity: optionalNumber(project.products[0]?.quantity ?? ""),
-      specification_model: optionalText(project.products[0]?.specificationModel ?? ""),
-      province: optionalText(project.province), city: optionalText(project.city), signed_at: optionalText(project.signedAt), project_detail: optionalText(project.projectDetail),
-      products: project.products.map((product) => ({
-        id: product.id, product_name: product.productName.trim(), brand: optionalText(product.brand), specification_model: optionalText(product.specificationModel),
-        unit_price: optionalNumber(product.unitPrice), quantity: optionalNumber(product.quantity), line_total: Number(product.lineTotal),
-      })),
     })),
     opportunities: form.opportunities.map((opportunity) => ({
       id: opportunity.id, title: opportunity.title.trim(), stage: opportunity.stage,
@@ -317,18 +290,27 @@ function OrganizationFormDialog({ organization, options, onCancel, onCreate, onS
     setForm((current) => ({ ...current, [field]: value }));
   }
 
-  /** 移除商机时同时清空成交项目中的旧关联，避免提交悬空外键。 */
+  /** 把高德候选一次性写入主地点，避免地址、行政区与坐标出现不同步。 */
+  function applyPrimaryLocation(location: AmapLocationSelection) {
+    setForm((current) => ({
+      ...current,
+      siteName: current.siteName || location.name,
+      rawAddress: location.address,
+      address: location.address,
+      province: location.province,
+      city: location.city,
+      district: location.district,
+      amapAdcode: location.amapAdcode,
+      geocodeStatus: "已定位",
+      geocodeConfidence: "100",
+      longitude: location.longitude,
+      latitude: location.latitude,
+    }));
+  }
+
+  /** 从单位表单移除商机；关联订单由数据库外键安全解除，不在此处改写订单。 */
   function removeOpportunity(index: number) {
-    setForm((current) => {
-      const removedId = current.opportunities[index]?.id;
-      return {
-        ...current,
-        opportunities: removeAt(current.opportunities, index),
-        salesProjects: removedId
-          ? current.salesProjects.map((project) => project.opportunityId === removedId ? { ...project, opportunityId: "" } : project)
-          : current.salesProjects,
-      };
-    });
+    updateField("opportunities", removeAt(form.opportunities, index));
   }
 
   /** 校验浏览器表单后按模式新增或修改；失败时保留草稿就地修正。 */
@@ -423,27 +405,8 @@ function OrganizationFormDialog({ organization, options, onCancel, onCreate, onS
           </section>
 
           <section>
-            <div className="organization-edit-section-head"><h3>成交项目</h3><button type="button" onClick={() => updateField("salesProjects", [...form.salesProjects, emptySalesProject(form.province, form.city)])}><Plus size={14} />新增成交项目</button></div>
-            {form.salesProjects.length === 0 ? <p className="organization-edit-empty">尚未添加成交项目。</p> : null}
-            <div className="organization-edit-records">
-              {form.salesProjects.map((project, index) => (
-                <article className="organization-edit-record" key={project.draftKey}>
-                  <div className="organization-edit-record-head"><strong>成交项目 {index + 1}</strong><button type="button" onClick={() => updateField("salesProjects", removeAt(form.salesProjects, index))}><Trash2 size={13} />移除</button></div>
-                  <div className="organization-edit-grid">
-                    <label><span>项目名称</span><input value={project.name} onChange={(event) => updateField("salesProjects", updateAt(form.salesProjects, index, { name: event.target.value }))} maxLength={255} required /></label>
-                    <label><span>实际成交金额（元）</span><input type="number" min={0} step="0.01" value={project.contractAmount} onChange={(event) => updateField("salesProjects", updateAt(form.salesProjects, index, { contractAmount: event.target.value }))} required /></label>
-                    <label><span>供应商</span><input value={project.supplierName} onChange={(event) => updateField("salesProjects", updateAt(form.salesProjects, index, { supplierName: event.target.value }))} maxLength={255} /></label>
-                    <label><span>省份</span><input value={project.province} onChange={(event) => updateField("salesProjects", updateAt(form.salesProjects, index, { province: event.target.value }))} maxLength={60} /></label>
-                    <label><span>城市</span><input value={project.city} onChange={(event) => updateField("salesProjects", updateAt(form.salesProjects, index, { city: event.target.value }))} maxLength={60} /></label>
-                    <label><span>签约日期</span><input type="date" value={project.signedAt} onChange={(event) => updateField("salesProjects", updateAt(form.salesProjects, index, { signedAt: event.target.value }))} /></label>
-                    <label><span>关联商机</span><select value={project.opportunityId} onChange={(event) => updateField("salesProjects", updateAt(form.salesProjects, index, { opportunityId: event.target.value }))}><option value="">不关联</option>{form.opportunities.filter((item) => item.id).map((item) => <option value={item.id ?? ""} key={item.draftKey}>{item.title || "未命名商机"}</option>)}</select></label>
-                    <label><span>负责销售</span><select value={project.salespersonId} onChange={(event) => updateField("salesProjects", updateAt(form.salesProjects, index, { salespersonId: event.target.value }))}><option value="">未指定</option>{(options?.salespeople ?? []).map((item) => <option value={item.id} key={item.id}>{item.display_name}（{item.employee_code}）{item.is_active ? "" : " · 已停用"}</option>)}</select></label>
-                    <AdminProductItemsEditor value={project.products} onChange={(products) => updateField("salesProjects", updateAt(form.salesProjects, index, { products }))} />
-                    <label className="field-wide"><span>项目详情</span><textarea value={project.projectDetail} onChange={(event) => updateField("salesProjects", updateAt(form.salesProjects, index, { projectDetail: event.target.value }))} maxLength={5000} rows={3} /></label>
-                  </div>
-                </article>
-              ))}
-            </div>
+            <div className="organization-edit-section-head"><div><h3>成交订单</h3><p>订单只在“成交订单”页面统一新增、修改和删除。</p></div></div>
+            <p className="organization-edit-empty">{organization ? `当前单位共 ${organization.sales_projects.length} 笔订单；此处仅显示数量。` : "创建单位后，可前往“成交订单”页面新增订单。"}</p>
           </section>
 
           <section>
@@ -469,6 +432,7 @@ function OrganizationFormDialog({ organization, options, onCancel, onCreate, onS
           <section>
             <h3>主地点与定位</h3>
             <div className="organization-edit-grid">
+              <AmapLocationSearch queryHint={form.siteName || form.name || form.address} value={{ address: form.address, longitude: form.longitude, latitude: form.latitude }} disabled={submitting} onSelect={applyPrimaryLocation} />
               <label><span>地点名称</span><input value={form.siteName} onChange={(event) => updateField("siteName", event.target.value)} maxLength={160} /></label>
               <label><span>高德区域编码</span><input value={form.amapAdcode} onChange={(event) => updateField("amapAdcode", event.target.value)} maxLength={12} /></label>
               <label><span>省份{!organization && createFieldRequirements.province ? " *" : ""}</span><input value={form.province} onChange={(event) => updateField("province", event.target.value)} maxLength={60} required={!organization && createFieldRequirements.province} /></label>
@@ -477,8 +441,8 @@ function OrganizationFormDialog({ organization, options, onCancel, onCreate, onS
               <label><span>定位状态</span><select value={form.geocodeStatus} onChange={(event) => updateField("geocodeStatus", event.target.value as GeocodeStatus)}>{geocodeStatuses.map((item) => <option key={item}>{item}</option>)}</select></label>
               <label className="field-wide"><span>原始地址</span><input value={form.rawAddress} onChange={(event) => updateField("rawAddress", event.target.value)} maxLength={500} /></label>
               <label className="field-wide"><span>标准地址</span><input value={form.address} onChange={(event) => updateField("address", event.target.value)} maxLength={500} /></label>
-              <label><span>经度</span><input type="number" min={73} max={136} step="any" value={form.longitude} onChange={(event) => updateField("longitude", event.target.value)} /></label>
-              <label><span>纬度</span><input type="number" min={3} max={54} step="any" value={form.latitude} onChange={(event) => updateField("latitude", event.target.value)} /></label>
+              <label><span>经度（自动）</span><input type="number" min={73} max={136} step="any" value={form.longitude} readOnly /></label>
+              <label><span>纬度（自动）</span><input type="number" min={3} max={54} step="any" value={form.latitude} readOnly /></label>
               <label><span>定位置信度</span><input type="number" min={0} max={100} step={1} value={form.geocodeConfidence} onChange={(event) => updateField("geocodeConfidence", event.target.value)} /></label>
             </div>
           </section>
@@ -573,6 +537,7 @@ export function AdminOrganizationWorkspace() {
   const [batchBusy, setBatchBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [exporting, setExporting] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const workspaceAbortRef = useRef<AbortController | null>(null);
@@ -830,8 +795,15 @@ export function AdminOrganizationWorkspace() {
 
   /** 清除服务端会话并完整返回公开主站，避免保留已退出的后台内存状态。 */
   async function logout() {
-    await apiFetch<void>("/auth/logout", { method: "POST" });
-    window.location.replace("/");
+    setLoggingOut(true);
+    setError(null);
+    try {
+      await apiFetch<void>("/auth/logout", { method: "POST" });
+      window.location.replace("/");
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "退出失败，请稍后重试");
+      setLoggingOut(false);
+    }
   }
 
   /** 切换当前账号有权访问的数据后台页面，并关闭只属于目标单位的地图和对话框状态。 */
@@ -861,7 +833,7 @@ export function AdminOrganizationWorkspace() {
       <header className="organization-admin-header admin-data-header">
         <div className="admin-data-heading"><h1>数据后台</h1></div>
         <nav className="admin-dataset-tabs" role="tablist" aria-label="后台数据页面">{visibleSectionTabs.map((tab) => <button key={tab.key} type="button" role="tab" aria-selected={activeSection === tab.key} className={activeSection === tab.key ? "selected" : ""} onClick={() => changeAdminSection(tab.key)}>{tab.label}</button>)}</nav>
-        <div className="admin-user"><Link className="admin-home-link" href="/"><ArrowLeft size={15} />返回主页面</Link>{activeSection === "organizations" ? <button onClick={() => void exportCurrentFilters()} disabled={exporting}><Download size={15} />{exporting ? "正在导出" : "导出当前筛选"}</button> : null}<div className="admin-exit-stack"><button onClick={() => void logout()}><LogOut size={15} />退出</button><span className="admin-username" title={username}>{username}</span></div></div>
+        <div className="admin-user"><Link className="admin-home-link" href="/"><ArrowLeft size={15} />返回主页面</Link>{activeSection === "organizations" ? <button onClick={() => void exportCurrentFilters()} disabled={exporting}><Download size={15} />{exporting ? "正在导出" : "导出当前筛选"}</button> : null}<div className="admin-exit-stack"><button onClick={() => void logout()} disabled={loggingOut}><LogOut size={15} />{loggingOut ? "正在退出…" : "退出"}</button><span className="admin-username" title={username}>{username}</span></div></div>
       </header>
       {activeSection === "organizations" ? <>
         <section className="organization-filter-bar"><label><Search size={15} /><input aria-label="搜索单位名称" placeholder="搜索单位名称" value={filters.search} onChange={(event) => updateFilters({ search: event.target.value })} /></label><select aria-label="按单位类型筛选" value={filters.type} onChange={(event) => updateFilters({ type: event.target.value })}><option value="">全部单位类型</option>{options?.organization_types.map((item) => <option key={item}>{item}</option>)}</select><select aria-label="按客户状态筛选" value={filters.customerStatus} onChange={(event) => updateFilters({ customerStatus: event.target.value })}><option value="">全部客户状态</option>{options?.customer_statuses.map((item) => <option key={item}>{item}</option>)}</select><select aria-label="按审核状态筛选" value={filters.reviewStatus} onChange={(event) => updateFilters({ reviewStatus: event.target.value })}><option value="">全部审核状态</option>{options?.review_statuses.map((item) => <option key={item}>{item}</option>)}</select><select aria-label="按省份筛选" value={filters.province} onChange={(event) => updateFilters({ province: event.target.value })}><option value="">全部省份</option>{options?.provinces.map((item) => <option key={item}>{item}</option>)}</select><select aria-label="按归档状态筛选" value={filters.archivedOnly ? "archived" : "active"} onChange={(event) => updateFilters({ archivedOnly: event.target.value === "archived" })}><option value="active">在用记录</option><option value="archived">已归档</option></select></section>
@@ -885,7 +857,7 @@ export function AdminOrganizationWorkspace() {
         {editing ? <OrganizationFormDialog key={editing.id} organization={editing} options={options} onCancel={() => setEditing(null)} onSave={saveOrganization} /> : null}
         {deleteTarget ? <DeleteConfirmationDialog key={deleteTarget.id} organization={deleteTarget} onCancel={() => setDeleteTarget(null)} onConfirm={deleteOrganization} /> : null}
         {batchIntent ? <BatchConfirmationDialog intent={batchIntent} count={selectedIds.size} onCancel={() => setBatchIntent(null)} onConfirm={() => executeBatchAction(batchIntent === "review" ? { ids: Array.from(selectedIds), action: "review", review_status: "已核验" } : { ids: Array.from(selectedIds), action: batchIntent })} /> : null}
-      </> : activeSection === "deals" ? <AdminDealWorkspace /> : activeSection === "sales" ? (canManageSalespeople ? <AdminSalesWorkspace /> : null) : activeSection === "groups" ? <AdminCustomerGroupWorkspace /> : activeSection === "competitors" ? <AdminCompetitorWorkspace /> : activeSection === "cases" ? <AdminTypicalCaseWorkspace /> : activeSection === "accounts" ? (canManageUsers ? <AdminAccountWorkspace /> : null) : <AdminDataWorkspace key={activeSection} section={activeSection} />}
+      </> : activeSection === "deals" ? <AdminDealWorkspace /> : activeSection === "sales" ? (canManageSalespeople ? <AdminSalesWorkspace /> : null) : activeSection === "groups" ? <AdminCustomerGroupWorkspace /> : activeSection === "cases" ? <AdminTypicalCaseWorkspace /> : activeSection === "accounts" ? (canManageUsers ? <AdminAccountWorkspace /> : null) : <AdminDataWorkspace key={activeSection} section={activeSection} />}
     </main>
   );
 }

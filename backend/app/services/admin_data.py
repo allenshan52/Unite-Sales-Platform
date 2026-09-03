@@ -51,6 +51,8 @@ from app.models import (
 from app.sales_coverage import SalesCoverageLevel
 from app.services.account_access import (
     AccountDataScope,
+    competitor_deal_visibility_condition,
+    competitor_order_visibility_condition,
     competitor_visibility_condition,
     coverage_scope_is_visible,
     customer_group_visibility_condition,
@@ -187,10 +189,7 @@ def _resource_scope_condition(
     if resource == "competitor_customers":
         return location_condition(CompetitorCustomer.province, CompetitorCustomer.city, scope)
     if resource == "competitor_deals":
-        return exists(select(1).where(
-            CompetitorCustomer.id == CompetitorDeal.competitor_customer_id,
-            location_condition(CompetitorCustomer.province, CompetitorCustomer.city, scope),
-        ))
+        return competitor_order_visibility_condition(scope)
     if resource == "competitor_strength_regions":
         return location_condition(CompetitorStrengthRegion.province, CompetitorStrengthRegion.city, scope)
     if resource == "competitor_links":
@@ -252,12 +251,20 @@ def ensure_admin_data_mutation_allowed(
 
     definition = _definition(resource)
     ensure_admin_data_resource_access(resource, scope)
+    if resource == "competitors" and record_id is None:
+        raise HTTPException(status_code=403, detail="新同行只能通过新增同行订单自动建档")
+    if resource == "competitors" and not values:
+        raise HTTPException(status_code=403, detail="同行公司请停用，不允许直接删除")
     if scope.unrestricted:
         return
     if resource in {"sales_office_locations", "channel_partners", "customer_groups", "salespeople"}:
         raise HTTPException(status_code=403, detail="该数据缺少单条区域归属，仅超级管理员可在此修改")
     if record_id is not None:
-        condition = _resource_scope_condition(resource, scope, actor_username)
+        condition = (
+            competitor_deal_visibility_condition(scope)
+            if resource == "competitors"
+            else _resource_scope_condition(resource, scope, actor_username)
+        )
         visible_id = db.scalar(select(definition.model.id).where(definition.model.id == record_id, condition)) if condition is not None else None
         if visible_id is None:
             raise HTTPException(status_code=403, detail="当前账号不能修改该区域的数据")
@@ -270,7 +277,11 @@ def ensure_admin_data_mutation_allowed(
     if resource in {"competitor_sites", "competitor_customers", "competitor_strength_regions"}:
         require_competitor_access(db, values["competitor_id"], scope, actor_username)
     elif resource == "competitor_deals":
-        if not _related_location_is_visible(db, CompetitorCustomer, values["competitor_customer_id"], scope):
+        province = values.get("province")
+        city = values.get("city")
+        if province and city:
+            require_location_access(scope, province, city)
+        elif not _related_location_is_visible(db, CompetitorCustomer, values["competitor_customer_id"], scope):
             raise HTTPException(status_code=403, detail="当前账号不能修改该区域的数据")
     elif resource == "competitor_links":
         customer_visible = _related_location_is_visible(db, CompetitorCustomer, values["competitor_customer_id"], scope)
@@ -459,7 +470,7 @@ def _prepare_values(db: Session, definition: ResourceDefinition, values: dict[st
     return prepared
 
 
-def _sync_competitor_deal_products(db: Session, record: CompetitorDeal, payloads: list[dict[str, Any]]) -> None:
+def sync_competitor_deal_products(db: Session, record: CompetitorDeal, payloads: list[dict[str, Any]]) -> None:
     """同步同行订单产品集合，并按提交顺序生成稳定展示位置。"""
 
     existing = {product.id: product for product in record.products}
@@ -474,8 +485,8 @@ def _sync_competitor_deal_products(db: Session, record: CompetitorDeal, payloads
         if product is None:
             raise HTTPException(status_code=422, detail="成交产品不属于当前同行订单")
         retained_ids.add(product_id)
-        for field, value in values.items():
-            setattr(product, field, value)
+        for field_name, value in values.items():
+            setattr(product, field_name, value)
         product.position = position
     for product_id, product in existing.items():
         if product_id not in retained_ids:
@@ -525,7 +536,7 @@ def create_admin_data(db: Session, resource: str, values: dict[str, Any], actor_
         product_payloads = _normalize_competitor_product_values(prepared, product_payloads)
     record = definition.model(id=uuid4(), **prepared)
     if definition.model is CompetitorDeal:
-        _sync_competitor_deal_products(db, record, product_payloads)
+        sync_competitor_deal_products(db, record, product_payloads)
     db.add(record)
     if definition.model is SalespersonCoverageScope:
         sync_linked_account_scopes(db, record.salesperson_id)
@@ -561,7 +572,7 @@ def update_admin_data(
     for name, value in prepared.items():
         setattr(record, name, value)
     if product_payloads is not None:
-        _sync_competitor_deal_products(db, record, product_payloads)
+        sync_competitor_deal_products(db, record, product_payloads)
     if definition.model is SalespersonCoverageScope:
         salesperson_ids = {previous_salesperson_id, record.salesperson_id}
         for salesperson_id in sorted((item for item in salesperson_ids if item is not None), key=str):

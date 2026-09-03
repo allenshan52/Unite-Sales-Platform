@@ -46,8 +46,10 @@ services:
       # HTTPS 演示/生产入口设为 true；本地 http://localhost 保持 false 才能登录。
       ADMIN_COOKIE_SECURE: ${ADMIN_COOKIE_SECURE:-false}
       AMAP_REST_API_KEY: ${AMAP_REST_API_KEY}
+      # API 容器复用 Nginx 的高德出口，避免宿主代理环境下容器直连 TLS 握手超时。
+      AMAP_SERVICE_BASE_URL: http://gateway/_AMapService
       # 正式域名必须在根 .env 显式覆盖，供 CORS 与登录 Origin 校验共用。
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3100}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:33100}
       REDIS_URL: redis://redis:6379/0
       # 数据库连接设置限制单实例并发连接，并主动回收失效或长期空闲的连接。
       DATABASE_POOL_SIZE: ${DATABASE_POOL_SIZE:-5}

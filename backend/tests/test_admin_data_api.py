@@ -7,13 +7,20 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from sqlalchemy.dialects import postgresql
 
 from app.admin_data_schemas import AdminDataPage
 from app.database import get_db
 from app.main import app
 from app.models import ChannelPartnerType, UserRole
 from app.sales_coverage import SalesCoverageLevel
-from app.services.admin_data import RESOURCE_DEFINITIONS, list_admin_data, validate_admin_data
+from app.services.account_access import AccountDataScope
+from app.services.admin_data import (
+    RESOURCE_DEFINITIONS,
+    ensure_admin_data_mutation_allowed,
+    list_admin_data,
+    validate_admin_data,
+)
 from app.services.auth import get_current_admin
 
 
@@ -73,6 +80,41 @@ def test_regular_user_cannot_mutate_resource_without_region_fields() -> None:
 
     assert response.status_code == 403
     assert "仅超级管理员" in response.json()["detail"]
+
+
+def test_competitor_generic_mutations_only_allow_scoped_profile_updates() -> None:
+    """同行主档禁止通用新增与物理删除，区域修改必须由可见订单而非据点授权。"""
+
+    scope = AccountDataScope(False, frozenset({"吉林"}), frozenset(), frozenset())
+    record_id = uuid4()
+
+    with pytest.raises(HTTPException) as create_error:
+        ensure_admin_data_mutation_allowed(object(), "competitors", None, {"name": "新同行"}, scope, "sales")  # type: ignore[arg-type]
+    assert create_error.value.status_code == 403
+    assert create_error.value.detail == "新同行只能通过新增同行订单自动建档"
+
+    with pytest.raises(HTTPException) as delete_error:
+        ensure_admin_data_mutation_allowed(object(), "competitors", record_id, {}, scope, "sales")  # type: ignore[arg-type]
+    assert delete_error.value.status_code == 403
+    assert delete_error.value.detail == "同行公司请停用，不允许直接删除"
+
+    class VisibleDealDb:
+        """记录准入 SQL，并模拟存在一笔当前区域可见的同行订单。"""
+
+        statement = None
+
+        def scalar(self, statement):
+            """保存查询供断言，并返回目标同行 ID 表示准入成功。"""
+
+            self.statement = statement
+            return record_id
+
+    db = VisibleDealDb()
+    ensure_admin_data_mutation_allowed(db, "competitors", record_id, {"name": "同行甲"}, scope, "sales")  # type: ignore[arg-type]
+    sql = str(db.statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+    assert "competitor_deal" in sql
+    assert "competitor_customer" in sql
+    assert "competitor_site" not in sql
 
 
 def test_admin_data_rejects_invalid_resource_fields() -> None:

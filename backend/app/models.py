@@ -520,7 +520,7 @@ class CompetitorSite(TimestampMixin, Base):
 
 
 class CompetitorCustomer(TimestampMixin, Base):
-    """同行成交单位保存原始竞争情报，不要求必须匹配现有正式单位。"""
+    """同行成交单位保存原始竞争情报；待补地址记录允许暂缺地址和地图坐标。"""
 
     __tablename__ = "competitor_customer"
 
@@ -528,11 +528,11 @@ class CompetitorCustomer(TimestampMixin, Base):
     competitor_id: Mapped[UUID] = mapped_column(ForeignKey("competitor.id", ondelete="CASCADE"), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     customer_level: Mapped[CompetitorCustomerLevel] = mapped_column(database_enum(CompetitorCustomerLevel, "competitor_customer_level"), nullable=False)
-    address: Mapped[str] = mapped_column(String(500), nullable=False)
+    address: Mapped[str | None] = mapped_column(String(500))
     province: Mapped[str] = mapped_column(String(60), nullable=False)
     city: Mapped[str] = mapped_column(String(60), nullable=False)
-    longitude: Mapped[float] = mapped_column(nullable=False)
-    latitude: Mapped[float] = mapped_column(nullable=False)
+    longitude: Mapped[float | None] = mapped_column()
+    latitude: Mapped[float | None] = mapped_column()
     source_type: Mapped[IntelligenceSourceType] = mapped_column(database_enum(IntelligenceSourceType, "intelligence_source_type"), nullable=False)
     source_reference: Mapped[str] = mapped_column(String(500), nullable=False)
     source_url: Mapped[str | None] = mapped_column(String(1000))
@@ -546,20 +546,25 @@ class CompetitorCustomer(TimestampMixin, Base):
 
     __table_args__ = (
         UniqueConstraint("competitor_id", "name", name="uq_competitor_customer_name"),
-        CheckConstraint("longitude BETWEEN 72.004 AND 137.8347 AND latitude BETWEEN 0.8293 AND 55.8271", name="ck_competitor_customer_gcj02_bounds"),
+        CheckConstraint(
+            "(longitude IS NULL AND latitude IS NULL) OR "
+            "(longitude IS NOT NULL AND latitude IS NOT NULL AND "
+            "longitude BETWEEN 72.004 AND 137.8347 AND latitude BETWEEN 0.8293 AND 55.8271)",
+            name="ck_competitor_customer_gcj02_bounds",
+        ),
         Index("ix_competitor_customer_competitor_id", "competitor_id"),
     )
 
 
 class CompetitorDeal(TimestampMixin, Base):
-    """同行成交记录保存项目、产品、数量、供应商、金额和来源，允许同一单位出现多笔交易。"""
+    """同行成交记录保存项目、所在地快照和可选情报，允许同一单位出现多笔交易。"""
 
     __tablename__ = "competitor_deal"
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
     competitor_customer_id: Mapped[UUID] = mapped_column(ForeignKey("competitor_customer.id", ondelete="CASCADE"), nullable=False)
     project_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    deal_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    deal_type: Mapped[str | None] = mapped_column(String(80))
     product_name: Mapped[str | None] = mapped_column(String(255))
     specification_model: Mapped[str | None] = mapped_column(String(255))
     product_image_url: Mapped[str | None] = mapped_column(String(1000))
@@ -568,10 +573,13 @@ class CompetitorDeal(TimestampMixin, Base):
     supplier_name: Mapped[str | None] = mapped_column(String(255))
     amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     signed_at: Mapped[date | None] = mapped_column(Date)
-    source_type: Mapped[IntelligenceSourceType] = mapped_column(database_enum(IntelligenceSourceType, "intelligence_source_type"), nullable=False)
-    source_reference: Mapped[str] = mapped_column(String(500), nullable=False)
+    location_name: Mapped[str | None] = mapped_column(String(255))
+    province: Mapped[str | None] = mapped_column(String(60))
+    city: Mapped[str | None] = mapped_column(String(60))
+    source_type: Mapped[IntelligenceSourceType | None] = mapped_column(database_enum(IntelligenceSourceType, "intelligence_source_type"))
+    source_reference: Mapped[str | None] = mapped_column(String(500))
     source_url: Mapped[str | None] = mapped_column(String(1000))
-    confidence: Mapped[IntelligenceConfidence] = mapped_column(database_enum(IntelligenceConfidence, "intelligence_confidence"), nullable=False)
+    confidence: Mapped[IntelligenceConfidence | None] = mapped_column(database_enum(IntelligenceConfidence, "intelligence_confidence"))
     notes: Mapped[str | None] = mapped_column(Text)
     customer: Mapped[CompetitorCustomer] = relationship(back_populates="deals")
     products: Mapped[list["CompetitorDealProduct"]] = relationship(
@@ -585,7 +593,12 @@ class CompetitorDeal(TimestampMixin, Base):
         CheckConstraint("unit_price IS NULL OR unit_price > 0", name="ck_competitor_deal_positive_unit_price"),
         CheckConstraint("quantity IS NULL OR quantity > 0", name="ck_competitor_deal_positive_quantity"),
         CheckConstraint("amount > 0", name="ck_competitor_deal_positive_amount"),
+        CheckConstraint(
+            "(province IS NULL AND city IS NULL) OR (province IS NOT NULL AND city IS NOT NULL)",
+            name="ck_competitor_deal_location_pair",
+        ),
         Index("ix_competitor_deal_customer_id", "competitor_customer_id"),
+        Index("ix_competitor_deal_signed_at", "signed_at"),
     )
 
 
@@ -809,7 +822,7 @@ class Opportunity(TimestampMixin, Base):
 
 
 class SalesProject(TimestampMixin, Base):
-    """保存优纳特实际成交项目及产品、供应商和成交所在地明细。"""
+    """保存优纳特实际成交项目及产品、供应商和成交所在地快照。"""
 
     __tablename__ = "sales_project"
 
@@ -823,6 +836,7 @@ class SalesProject(TimestampMixin, Base):
     quantity: Mapped[Decimal | None] = mapped_column(Numeric(14, 3))
     supplier_name: Mapped[str | None] = mapped_column(String(255))
     specification_model: Mapped[str | None] = mapped_column(String(255))
+    location_name: Mapped[str | None] = mapped_column(String(255))
     province: Mapped[str | None] = mapped_column(String(60))
     city: Mapped[str | None] = mapped_column(String(60))
     signed_at: Mapped[date | None] = mapped_column(Date)
@@ -841,7 +855,12 @@ class SalesProject(TimestampMixin, Base):
         CheckConstraint("contract_amount >= 0", name="ck_sales_project_contract_amount_nonnegative"),
         CheckConstraint("unit_price IS NULL OR unit_price > 0", name="ck_sales_project_unit_price_positive"),
         CheckConstraint("quantity IS NULL OR quantity > 0", name="ck_sales_project_quantity_positive"),
+        CheckConstraint(
+            "(province IS NULL AND city IS NULL) OR (province IS NOT NULL AND city IS NOT NULL)",
+            name="ck_sales_project_location_pair",
+        ),
         Index("ix_sales_project_organization_id", "organization_id"),
+        Index("ix_sales_project_opportunity_id", "opportunity_id"),
         Index("ix_sales_project_signed_at", "signed_at"),
         Index("ix_sales_project_salesperson_signed_at", "salesperson_id", "signed_at"),
     )
