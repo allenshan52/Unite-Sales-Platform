@@ -2,17 +2,47 @@
 
 import re
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException
 from geoalchemy2.elements import WKTElement
-from sqlalchemy import Select, and_, func, select
+from sqlalchemy import Select, and_, case, exists, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm.exc import StaleDataError
 
-from app.models import AuditLog, CustomerStatus, EvidenceKind, GeocodeStatus, Opportunity, Organization, OrganizationContact, OrganizationEvidence, OrganizationSite, OrganizationType, ReviewStatus, SalesProject
-from app.schemas import OrganizationAdminCreate, OrganizationRead, OrganizationUpdate, ProvinceOrganizationSummary, ReviewAction, SiteInput
+from app.models import (
+    AuditLog,
+    CompetitorCustomer,
+    CompetitorCustomerOrganizationLink,
+    CustomerStatus,
+    GeocodeStatus,
+    Opportunity,
+    OpportunityStage,
+    Organization,
+    OrganizationContact,
+    OrganizationEvidence,
+    OrganizationSite,
+    OrganizationType,
+    ReviewStatus,
+    SalesProject,
+    SalesProjectProduct,
+)
+from app.schemas import (
+    MapPoint,
+    OrganizationAdminCreate,
+    OrganizationBatchAction,
+    OrganizationRead,
+    OrganizationUpdate,
+    PublicWonCustomerDealRead,
+    PublicWonCustomerMapPointRead,
+    ReviewAction,
+    SiteInput,
+)
+from app.services.account_access import AccountDataScope, location_condition, organization_visibility_condition
 from app.services.geocoding import gcj02_to_wgs84
 
 
@@ -33,6 +63,22 @@ def _ensure_organization_is_not_duplicate(db: Session, name: str, *, exclude_id:
         raise HTTPException(status_code=409, detail=f"数据库中已存在同名单位“{duplicate.name}”，请核对后再添加")
 
 
+def _raise_organization_conflict(db: Session, error: IntegrityError) -> None:
+    """回滚数据库唯一约束冲突，并转换为不泄露 SQL 的中文 409。"""
+
+    db.rollback()
+    constraint_name = getattr(getattr(error.orig, "diag", None), "constraint_name", None)
+    messages = {
+        "uq_organization_normalized_name": "数据库中已存在同名单位，请核对后再保存",
+        "organization_unified_social_credit_code_key": "该统一社会信用代码已被其他单位使用",
+        "uq_organization_site_primary": "每个单位只能保留一个主地点",
+    }
+    raise HTTPException(
+        status_code=409,
+        detail=messages.get(constraint_name, "单位数据与现有记录冲突，请核对名称、统一社会信用代码和主地点"),
+    ) from error
+
+
 def _query_with_relations() -> Select[tuple[Organization]]:
     """提供详情所需关联预加载，避免列表和抽屉发生 N+1 查询。"""
 
@@ -41,7 +87,7 @@ def _query_with_relations() -> Select[tuple[Organization]]:
         selectinload(Organization.evidences),
         selectinload(Organization.contacts),
         selectinload(Organization.opportunities),
-        selectinload(Organization.sales_projects),
+        selectinload(Organization.sales_projects).selectinload(SalesProject.products),
     )
 
 
@@ -62,6 +108,31 @@ def _postgis_location(longitude: float | None, latitude: float | None) -> WKTEle
         return None
     wgs_longitude, wgs_latitude = gcj02_to_wgs84(longitude, latitude)
     return WKTElement(f"POINT({wgs_longitude} {wgs_latitude})", srid=4326)
+
+
+def _sales_project_from_input(payload: Any) -> SalesProject:
+    """把成交项目输入拆成主记录和按表单顺序保存的产品明细。"""
+
+    values = payload.model_dump(exclude={"id", "products"})
+    product_values = [product.model_dump(exclude={"id"}) for product in payload.products]
+    if not product_values and (payload.unit_price is not None or payload.quantity is not None or payload.specification_model):
+        product_values = [{
+            "product_name": payload.name,
+            "specification_model": payload.specification_model,
+            "unit_price": payload.unit_price,
+            "quantity": payload.quantity,
+            "line_total": payload.contract_amount,
+        }]
+    if product_values:
+        first = product_values[0]
+        values.update(unit_price=first["unit_price"], quantity=first["quantity"], specification_model=first["specification_model"])
+    return SalesProject(
+        **values,
+        products=[
+            SalesProjectProduct(**product, position=position)
+            for position, product in enumerate(product_values)
+        ],
+    )
 
 
 def create_organization(db: Session, payload: OrganizationAdminCreate, actor_username: str) -> Organization:
@@ -91,7 +162,7 @@ def create_organization(db: Session, payload: OrganizationAdminCreate, actor_use
         sites=[_site_from_input(site_input)],
         contacts=[OrganizationContact(**item.model_dump(exclude={"id"})) for item in payload.contacts],
         opportunities=[Opportunity(**item.model_dump(exclude={"id"})) for item in payload.opportunities],
-        sales_projects=[SalesProject(**item.model_dump(exclude={"id"})) for item in payload.sales_projects],
+        sales_projects=[_sales_project_from_input(item) for item in payload.sales_projects],
         evidences=[
             OrganizationEvidence(
                 evidence_kind=item.evidence_kind,
@@ -118,10 +189,21 @@ def create_organization(db: Session, payload: OrganizationAdminCreate, actor_use
             },
         ))
         db.commit()
+    except IntegrityError as error:
+        _raise_organization_conflict(db, error)
     except Exception:
         db.rollback()
         raise
     return get_organization(db, organization.id)
+
+
+def _query_for_export() -> Select[tuple[Organization]]:
+    """只预加载导出工作簿实际使用的地点和证据，避免读取受保护商业子表。"""
+
+    return select(Organization).options(
+        selectinload(Organization.sites),
+        selectinload(Organization.evidences),
+    )
 
 
 def get_organization(db: Session, organization_id: UUID) -> Organization:
@@ -148,21 +230,29 @@ def list_organizations(
     geocode_status: GeocodeStatus | None,
     sports_only: bool,
     verified_only: bool = False,
+    archived_only: bool = False,
+    data_scope: AccountDataScope | None = None,
 ) -> tuple[list[Organization], int]:
-    """按管理后台筛选项分页查询单位，地址条件只作用于关联地点。"""
+    """按管理后台筛选项和账号区域分页查询单位，地址条件只作用于关联地点。"""
 
     statement = _query_with_relations()
     count_statement = select(func.count(Organization.id)).select_from(Organization)
     conditions = _organization_filter_conditions(
         search=search, types=types, customer_statuses=customer_statuses, review_statuses=review_statuses,
         province=province, city=city, district=district, geocode_status=geocode_status,
-        sports_only=sports_only, verified_only=verified_only,
+        sports_only=sports_only, verified_only=verified_only, archived_only=archived_only,
     )
+    if data_scope is not None:
+        conditions.append(organization_visibility_condition(data_scope))
     if conditions:
         statement = statement.where(*conditions)
         count_statement = count_statement.where(*conditions)
     total = db.scalar(count_statement) or 0
-    items = db.scalars(statement.order_by(Organization.updated_at.desc()).offset((page - 1) * page_size).limit(page_size)).all()
+    items = db.scalars(
+        statement.order_by(Organization.updated_at.desc(), Organization.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
     return list(items), total
 
 
@@ -178,8 +268,12 @@ def list_public_organizations(
     province: str | None,
     city: str | None,
     district: str | None,
+    data_scope: AccountDataScope | None = None,
 ) -> tuple[list[tuple[Organization, int]], int]:
-    """分页读取公开目录需要的主档、地点和证据计数，不加载内部商业关联。"""
+    """分页读取账号范围内的公开主档、地点和证据计数，不加载内部商业关联。"""
+
+    if data_scope is None:
+        data_scope = AccountDataScope(True, frozenset(), frozenset(), frozenset())
 
     evidence_counts = (
         select(
@@ -200,11 +294,26 @@ def list_public_organizations(
         geocode_status=None,
         sports_only=False,
         verified_only=False,
+        archived_only=False,
     )
+    if data_scope is not None:
+        conditions.append(organization_visibility_condition(data_scope))
+    conditions.append(exists(select(1).where(
+        OrganizationSite.organization_id == Organization.id,
+        location_condition(OrganizationSite.province, OrganizationSite.city, data_scope),
+    )))
     statement = (
         select(Organization, func.coalesce(evidence_counts.c.evidence_count, 0))
         .outerjoin(evidence_counts, evidence_counts.c.organization_id == Organization.id)
-        .options(selectinload(Organization.sites))
+        .options(
+            selectinload(Organization.sites),
+            selectinload(Organization.competitor_links)
+            .selectinload(CompetitorCustomerOrganizationLink.competitor_customer)
+            .selectinload(CompetitorCustomer.competitor),
+            selectinload(Organization.competitor_links)
+            .selectinload(CompetitorCustomerOrganizationLink.competitor_customer)
+            .selectinload(CompetitorCustomer.deals),
+        )
     )
     count_statement = select(func.count(Organization.id)).select_from(Organization)
     if conditions:
@@ -212,36 +321,149 @@ def list_public_organizations(
         count_statement = count_statement.where(*conditions)
     total = db.scalar(count_statement) or 0
     rows = db.execute(
-        statement.order_by(Organization.updated_at.desc()).offset((page - 1) * page_size).limit(page_size)
+        statement.order_by(Organization.updated_at.desc(), Organization.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
     ).all()
     return [(organization, int(evidence_count)) for organization, evidence_count in rows], total
 
 
-def summarize_organizations_by_province(db: Session) -> list[ProvinceOrganizationSummary]:
-    """按主地点聚合省份单位总量、单位类型和客户状态，供公开热力图一次读取。"""
+def list_organization_map_points(
+    db: Session,
+    *,
+    types: Sequence[OrganizationType],
+    customer_statuses: Sequence[CustomerStatus],
+    review_statuses: Sequence[ReviewStatus],
+    province: str | None,
+    city: str | None,
+    district: str | None,
+    verified_only: bool,
+    data_scope: AccountDataScope | None = None,
+) -> list[MapPoint]:
+    """一次查询账号范围内可信主地点与非失单商机汇总，避免地图追加请求。"""
 
-    rows = db.execute(
+    if data_scope is None:
+        data_scope = AccountDataScope(True, frozenset(), frozenset(), frozenset())
+
+    stage_rank = case(
+        (Opportunity.stage == OpportunityStage.identified, 1),
+        (Opportunity.stage == OpportunityStage.qualifying, 2),
+        (Opportunity.stage == OpportunityStage.proposal, 3),
+        (Opportunity.stage == OpportunityStage.negotiation, 4),
+        else_=None,
+    )
+    opportunity_summary = (
         select(
-            OrganizationSite.province,
-            Organization.organization_type,
-            Organization.customer_status,
-            func.count(func.distinct(Organization.id)),
+            Opportunity.organization_id.label("organization_id"),
+            func.count(Opportunity.id).label("active_count"),
+            func.coalesce(func.sum(Opportunity.estimated_amount), 0).label("estimated_amount"),
+            func.max(stage_rank).label("stage_rank"),
         )
-        .select_from(Organization)
+        .where(Opportunity.stage != OpportunityStage.closed_lost)
+        .group_by(Opportunity.organization_id)
+        .subquery()
+    )
+    statement = (
+        select(
+            Organization,
+            OrganizationSite,
+            func.coalesce(opportunity_summary.c.active_count, 0),
+            func.coalesce(opportunity_summary.c.estimated_amount, 0),
+            opportunity_summary.c.stage_rank,
+        )
+        .join(OrganizationSite)
+        .outerjoin(opportunity_summary, opportunity_summary.c.organization_id == Organization.id)
+        .where(
+            Organization.archived_at.is_(None),
+            OrganizationSite.is_primary.is_(True),
+            OrganizationSite.geocode_status == GeocodeStatus.resolved,
+            OrganizationSite.longitude.is_not(None),
+            OrganizationSite.latitude.is_not(None),
+            location_condition(OrganizationSite.province, OrganizationSite.city, data_scope),
+        )
+    )
+    if types:
+        statement = statement.where(Organization.organization_type.in_(types))
+    if customer_statuses:
+        statement = statement.where(Organization.customer_status.in_(customer_statuses))
+    if review_statuses:
+        statement = statement.where(Organization.review_status.in_(review_statuses))
+    if province:
+        statement = statement.where(OrganizationSite.province == province)
+    if city:
+        statement = statement.where(OrganizationSite.city == city)
+    if district:
+        statement = statement.where(OrganizationSite.district == district)
+    if verified_only:
+        statement = statement.where(Organization.review_status == ReviewStatus.verified)
+
+    stages = {
+        1: OpportunityStage.identified,
+        2: OpportunityStage.qualifying,
+        3: OpportunityStage.proposal,
+        4: OpportunityStage.negotiation,
+    }
+    rows = db.execute(statement.limit(25000)).all()
+    return [
+        MapPoint(
+            id=organization.id,
+            name=organization.name,
+            organization_type=organization.organization_type,
+            customer_status=organization.customer_status,
+            review_status=organization.review_status,
+            longitude=site.longitude,
+            latitude=site.latitude,
+            province=site.province,
+            city=site.city,
+            district=site.district,
+            address=site.address,
+            active_opportunity_count=int(active_count),
+            opportunity_stage=stages.get(int(current_stage_rank)) if current_stage_rank is not None else None,
+            estimated_opportunity_amount=Decimal(estimated_amount),
+        )
+        for organization, site, active_count, estimated_amount, current_stage_rank in rows
+    ]
+
+
+def list_public_won_customer_map_points(db: Session) -> list[PublicWonCustomerMapPointRead]:
+    """从正式单位库筛选已成交客户，并由实际成交项目实时汇总地图详情。"""
+
+    statement = (
+        select(Organization, OrganizationSite)
         .join(OrganizationSite, OrganizationSite.organization_id == Organization.id)
-        .where(OrganizationSite.is_primary.is_(True), OrganizationSite.province.is_not(None))
-        .group_by(OrganizationSite.province, Organization.organization_type, Organization.customer_status)
-    ).all()
-    summaries: dict[str, ProvinceOrganizationSummary] = {}
-    for province, organization_type, customer_status, count in rows:
-        summary = summaries.setdefault(
-            province,
-            ProvinceOrganizationSummary(province=province, total=0, organization_types={}, customer_statuses={}),
+        .options(selectinload(Organization.sales_projects))
+        .where(
+            Organization.customer_status == CustomerStatus.won,
+            Organization.archived_at.is_(None),
+            OrganizationSite.is_primary.is_(True),
+            OrganizationSite.geocode_status == GeocodeStatus.resolved,
+            OrganizationSite.longitude.is_not(None),
+            OrganizationSite.latitude.is_not(None),
         )
-        summary.total += count
-        summary.organization_types[organization_type.value] = summary.organization_types.get(organization_type.value, 0) + count
-        summary.customer_statuses[customer_status.value] = summary.customer_statuses.get(customer_status.value, 0) + count
-    return sorted(summaries.values(), key=lambda item: (-item.total, item.province))
+        .order_by(Organization.name)
+        .limit(5000)
+    )
+    points: list[PublicWonCustomerMapPointRead] = []
+    for organization, site in db.execute(statement).unique().all():
+        projects = sorted(organization.sales_projects, key=lambda item: item.signed_at or date.min, reverse=True)
+        points.append(PublicWonCustomerMapPointRead(
+            id=organization.id,
+            name=organization.name,
+            organization_type=organization.organization_type,
+            industry=organization.industry,
+            customer_status=organization.customer_status,
+            review_status=organization.review_status,
+            address=site.address,
+            province=site.province,
+            city=site.city,
+            district=site.district,
+            longitude=site.longitude,
+            latitude=site.latitude,
+            deal_count=len(projects),
+            actual_sales_amount=sum((project.contract_amount for project in projects), start=Decimal(0)),
+            deals=[PublicWonCustomerDealRead.model_validate(project, from_attributes=True) for project in projects],
+        ))
+    return points
 
 
 def list_organizations_for_export(
@@ -257,15 +479,18 @@ def list_organizations_for_export(
     geocode_status: GeocodeStatus | None,
     sports_only: bool,
     verified_only: bool,
+    data_scope: AccountDataScope | None = None,
 ) -> list[Organization]:
-    """导出时复用列表筛选条件读取全部匹配单位，避免浏览器分页导致下载缺行。"""
+    """导出时复用列表与账号区域条件，避免下载夹带范围外单位。"""
 
-    statement = _query_with_relations()
+    statement = _query_for_export()
     conditions = _organization_filter_conditions(
         search=search, types=types, customer_statuses=customer_statuses, review_statuses=review_statuses,
         province=province, city=city, district=district, geocode_status=geocode_status,
-        sports_only=sports_only, verified_only=verified_only,
+        sports_only=sports_only, verified_only=verified_only, archived_only=False,
     )
+    if data_scope is not None:
+        conditions.append(organization_visibility_condition(data_scope))
     if conditions:
         statement = statement.where(*conditions)
     return list(db.scalars(statement.order_by(Organization.name)).unique().all())
@@ -283,11 +508,13 @@ def _organization_filter_conditions(
     geocode_status: GeocodeStatus | None,
     sports_only: bool,
     verified_only: bool,
+    archived_only: bool,
 ) -> list[object]:
     """集中维护列表与导出共享的筛选语义，防止同一条件在不同入口结果不一致。"""
 
     conditions: list[object] = []
     site_conditions: list[object] = []
+    conditions.append(Organization.archived_at.is_not(None) if archived_only else Organization.archived_at.is_(None))
     if search:
         conditions.append(Organization.name.ilike(f"%{search.strip()}%"))
     if types:
@@ -369,11 +596,81 @@ def _sync_related_records(db: Session, records: list[Any], payloads: list[Any], 
             db.delete(record)
 
 
+def _sync_sales_project_products(db: Session, project: SalesProject, payloads: list[Any]) -> None:
+    """原子同步一笔优纳特成交项目的产品集合，并拒绝跨项目复用产品 ID。"""
+
+    existing = {product.id: product for product in project.products}
+    retained_ids: set[UUID] = set()
+    for position, payload in enumerate(payloads):
+        values = payload.model_dump(exclude={"id"})
+        if payload.id is None:
+            project.products.append(SalesProjectProduct(**values, position=position))
+            continue
+        product = existing.get(payload.id)
+        if product is None:
+            raise HTTPException(status_code=422, detail="成交产品不属于当前项目")
+        retained_ids.add(payload.id)
+        for field, value in values.items():
+            setattr(product, field, value)
+        product.position = position
+    for product_id, product in existing.items():
+        if product_id not in retained_ids:
+            db.delete(product)
+
+
+def _sync_sales_projects(db: Session, records: list[SalesProject], payloads: list[Any]) -> None:
+    """同步成交项目主记录，并把嵌套产品交给专用同步逻辑维护。"""
+
+    existing = {record.id: record for record in records}
+    retained_ids: set[UUID] = set()
+    for payload in payloads:
+        values = payload.model_dump(exclude={"id", "products"})
+        if payload.id is None:
+            records.append(_sales_project_from_input(payload))
+            continue
+        project = existing.get(payload.id)
+        if project is None:
+            raise HTTPException(status_code=422, detail="成交项目不属于当前单位")
+        retained_ids.add(payload.id)
+        for field, value in values.items():
+            setattr(project, field, value)
+        if "products" in payload.model_fields_set:
+            _sync_sales_project_products(db, project, payload.products)
+        elif payload.unit_price is not None or payload.quantity is not None or payload.specification_model:
+            if project.products:
+                first_product = project.products[0]
+                first_product.product_name = payload.name
+                first_product.unit_price = payload.unit_price
+                first_product.quantity = payload.quantity
+                first_product.specification_model = payload.specification_model
+                first_product.line_total = payload.contract_amount
+            else:
+                project.products.append(SalesProjectProduct(
+                    product_name=payload.name,
+                    unit_price=payload.unit_price,
+                    quantity=payload.quantity,
+                    specification_model=payload.specification_model,
+                    line_total=payload.contract_amount,
+                    position=0,
+                ))
+        if payload.products:
+            first = payload.products[0]
+            project.unit_price = first.unit_price
+            project.quantity = first.quantity
+            project.specification_model = first.specification_model
+    for project_id, project in existing.items():
+        if project_id not in retained_ids:
+            db.delete(project)
+
+
 def update_organization(db: Session, organization_id: UUID, payload: OrganizationUpdate, actor_username: str) -> Organization:
     """原子更新单位主档、主地点及联系人、成交项目和商机集合。"""
 
     organization = get_organization(db, organization_id)
     changes = payload.model_dump(exclude_unset=True)
+    expected_version = changes.pop("version")
+    if organization.version != expected_version:
+        raise HTTPException(status_code=409, detail="该单位已被其他操作更新，请刷新后重试")
     site_changes = changes.pop("primary_site", None)
     contact_changes = changes.pop("contacts", None)
     sales_project_changes = changes.pop("sales_projects", None)
@@ -404,7 +701,7 @@ def update_organization(db: Session, organization_id: UUID, payload: Organizatio
         for project in payload.sales_projects or []:
             if project.opportunity_id is not None and project.opportunity_id not in retained_opportunity_ids:
                 raise HTTPException(status_code=422, detail="成交项目关联商机必须属于当前单位")
-        _sync_related_records(db, organization.sales_projects, payload.sales_projects or [], SalesProject, "成交项目")
+        _sync_sales_projects(db, organization.sales_projects, payload.sales_projects or [])
     audit_fields = [
         *changes,
         *(["primary_site"] if site_changes is not None else []),
@@ -413,7 +710,13 @@ def update_organization(db: Session, organization_id: UUID, payload: Organizatio
         *(["opportunities"] if opportunity_changes is not None else []),
     ]
     db.add(AuditLog(organization_id=organization.id, actor_username=actor_username, action="编辑单位", detail={"字段": audit_fields}))
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as error:
+        _raise_organization_conflict(db, error)
+    except StaleDataError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="该单位已被其他操作更新，请刷新后重试") from None
     return get_organization(db, organization_id)
 
 
@@ -434,8 +737,57 @@ def review_organization(db: Session, organization_id: UUID, payload: ReviewActio
     organization = get_organization(db, organization_id)
     organization.review_status = payload.review_status
     db.add(AuditLog(organization_id=organization.id, actor_username=actor_username, action="审核单位", detail={"状态": payload.review_status.value, "备注": payload.note}))
-    db.commit()
+    try:
+        db.commit()
+    except StaleDataError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="该单位已被其他操作更新，请刷新后重试") from None
     return get_organization(db, organization_id)
+
+
+def batch_update_organizations(db: Session, payload: OrganizationBatchAction, actor_username: str) -> int:
+    """锁定所选单位并在单一事务内审核、归档、恢复或分配负责人。"""
+
+    organizations = list(db.scalars(select(Organization).where(Organization.id.in_(payload.ids)).with_for_update()).all())
+    if len(organizations) != len(payload.ids):
+        raise HTTPException(status_code=404, detail="部分单位已不存在，请刷新列表后重试")
+    now = datetime.now(UTC)
+    updated = 0
+    for organization in organizations:
+        detail: dict[str, object]
+        if payload.action == "review":
+            assert payload.review_status is not None
+            if organization.review_status is payload.review_status:
+                continue
+            organization.review_status = payload.review_status
+            detail = {"状态": payload.review_status.value, "备注": payload.note}
+            action = "批量审核单位"
+        elif payload.action == "archive":
+            if organization.archived_at is not None:
+                continue
+            organization.archived_at = now
+            detail = {"归档时间": now.isoformat()}
+            action = "批量归档单位"
+        elif payload.action == "restore":
+            if organization.archived_at is None:
+                continue
+            organization.archived_at = None
+            detail = {"恢复时间": now.isoformat()}
+            action = "批量恢复单位"
+        else:
+            if organization.follow_up_owner == payload.follow_up_owner:
+                continue
+            organization.follow_up_owner = payload.follow_up_owner
+            detail = {"负责人": payload.follow_up_owner}
+            action = "批量分配负责人"
+        db.add(AuditLog(organization_id=organization.id, actor_username=actor_username, action=action, detail=detail))
+        updated += 1
+    try:
+        db.commit()
+    except StaleDataError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="部分单位已被其他操作更新，请刷新后重试") from None
+    return updated
 
 
 def to_read(organization: Organization) -> OrganizationRead:
