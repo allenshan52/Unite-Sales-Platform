@@ -8,11 +8,56 @@ from sqlalchemy import distinct, select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import CustomerStatus, GeocodeStatus, Organization, OrganizationSite, OrganizationType, ReviewStatus
-from app.schemas import FilterOptions, MapPoint, OrganizationAdminCreate, OrganizationPage, OrganizationRead, OrganizationUpdate, ProvinceOrganizationSummary, PublicOrganizationPage, PublicOrganizationRead, PublicSiteRead, ReviewAction
-from app.services.auth import get_current_admin
+from app.models import (
+    AdminUser,
+    CustomerStatus,
+    GeocodeStatus,
+    Organization,
+    OrganizationSite,
+    OrganizationType,
+    ReviewStatus,
+    Salesperson,
+)
+from app.schemas import (
+    FilterOptions,
+    MapPoint,
+    OrganizationAdminCreate,
+    OrganizationBatchAction,
+    OrganizationBatchResult,
+    OrganizationPage,
+    OrganizationRead,
+    OrganizationUpdate,
+    PublicOrganizationPage,
+    PublicOrganizationRead,
+    PublicSiteRead,
+    PublicWonCustomerMapPointRead,
+    ReviewAction,
+    SalespersonOptionRead,
+)
+from app.services.account_access import (
+    account_data_scope,
+    location_condition,
+    location_is_visible,
+    require_location_access,
+    require_organization_access,
+)
+from app.services.auth import get_current_admin, get_current_user
+from app.services.competitors import public_organization_competitor_links
 from app.services.organization_exports import build_organization_export_workbook
-from app.services.organizations import create_organization, delete_organization, get_organization, list_organizations, list_organizations_for_export, list_public_organizations, review_organization, summarize_organizations_by_province, to_read, update_organization
+from app.services.organizations import (
+    batch_update_organizations,
+    create_organization,
+    delete_organization,
+    get_organization,
+    list_organization_map_points,
+    list_organizations,
+    list_organizations_for_export,
+    list_public_organizations,
+    list_public_won_customer_map_points,
+    review_organization,
+    to_read,
+    update_organization,
+)
 
 router = APIRouter(prefix="/organizations", tags=["单位管理"])
 public_router = APIRouter(prefix="/public/organizations", tags=["公开单位目录"])
@@ -24,18 +69,22 @@ def filter_options(
     province: str | None = Query(default=None, max_length=60),
     city: str | None = Query(default=None, max_length=60),
     db: Session = Depends(get_db),
+    user: AdminUser = Depends(get_current_user),
 ) -> FilterOptions:
-    """按已选省市返回完整层级选项，供地图和单位库共享同一数据库口径。"""
+    """返回账号范围内地点层级与销售人员选项，管理员仍保持全国范围。"""
 
-    provinces = db.scalars(select(distinct(OrganizationSite.province)).where(OrganizationSite.province.is_not(None)).order_by(OrganizationSite.province)).all()
-    city_statement = select(distinct(OrganizationSite.city)).where(OrganizationSite.city.is_not(None))
+    data_scope = account_data_scope(user)
+    scope_condition = location_condition(OrganizationSite.province, OrganizationSite.city, data_scope)
+    provinces = db.scalars(select(distinct(OrganizationSite.province)).join(Organization).where(OrganizationSite.province.is_not(None), Organization.archived_at.is_(None), scope_condition).order_by(OrganizationSite.province)).all()
+    city_statement = select(distinct(OrganizationSite.city)).join(Organization).where(OrganizationSite.city.is_not(None), Organization.archived_at.is_(None), scope_condition)
     if province:
         city_statement = city_statement.where(OrganizationSite.province == province)
     cities = db.scalars(city_statement.order_by(OrganizationSite.city)).all() if province else []
-    district_statement = select(distinct(OrganizationSite.district)).where(OrganizationSite.district.is_not(None))
+    district_statement = select(distinct(OrganizationSite.district)).join(Organization).where(OrganizationSite.district.is_not(None), Organization.archived_at.is_(None), scope_condition)
     if province and city:
         district_statement = district_statement.where(OrganizationSite.province == province, OrganizationSite.city == city)
     districts = db.scalars(district_statement.order_by(OrganizationSite.district)).all() if province and city else []
+    salespeople = db.scalars(select(Salesperson).order_by(Salesperson.is_active.desc(), Salesperson.employee_code, Salesperson.id)).all()
     return FilterOptions(
         organization_types=[item.value for item in OrganizationType],
         customer_statuses=[item.value for item in CustomerStatus],
@@ -43,14 +92,15 @@ def filter_options(
         provinces=list(provinces),
         cities=list(cities),
         districts=list(districts),
+        salespeople=[SalespersonOptionRead.model_validate(item) for item in salespeople],
     )
 
 
-@public_router.get("/province-summaries", response_model=list[ProvinceOrganizationSummary])
-def province_summaries(db: Session = Depends(get_db)) -> list[ProvinceOrganizationSummary]:
-    """匿名返回省级单位聚合数据，不暴露单位明细、地址或坐标。"""
+@public_router.get("/won-customers", response_model=list[PublicWonCustomerMapPointRead])
+def public_won_customers(db: Session = Depends(get_db)) -> list[PublicWonCustomerMapPointRead]:
+    """匿名返回已成交且具备可靠主地点的优纳特客户及实际成交项目。"""
 
-    return summarize_organizations_by_province(db)
+    return list_public_won_customer_map_points(db)
 
 
 @router.get("/map-points", response_model=list[MapPoint], dependencies=[Depends(get_current_admin)])
@@ -64,45 +114,21 @@ def map_points(
     district: str | None = Query(default=None, max_length=80),
     verified_only: bool = False,
     db: Session = Depends(get_db),
+    user: AdminUser = Depends(get_current_user),
 ) -> list[MapPoint]:
-    """只返回有可靠坐标的主地点，交由前端 AMap.MarkerCluster 在视图范围内聚合。"""
+    """返回账号范围内可信主地点与安全商机汇总，管理员仍读取全国。"""
 
-    statement = select(Organization, OrganizationSite).join(OrganizationSite).where(
-        OrganizationSite.is_primary.is_(True),
-        OrganizationSite.geocode_status == GeocodeStatus.resolved,
-        OrganizationSite.longitude.is_not(None),
-        OrganizationSite.latitude.is_not(None),
+    return list_organization_map_points(
+        db,
+        types=types,
+        customer_statuses=customer_statuses,
+        review_statuses=review_statuses,
+        province=province,
+        city=city,
+        district=district,
+        verified_only=verified_only,
+        data_scope=account_data_scope(user),
     )
-    if types:
-        statement = statement.where(Organization.organization_type.in_(types))
-    if customer_statuses:
-        statement = statement.where(Organization.customer_status.in_(customer_statuses))
-    if review_statuses:
-        statement = statement.where(Organization.review_status.in_(review_statuses))
-    if province:
-        statement = statement.where(OrganizationSite.province == province)
-    if city:
-        statement = statement.where(OrganizationSite.city == city)
-    if district:
-        statement = statement.where(OrganizationSite.district == district)
-    if verified_only:
-        statement = statement.where(Organization.review_status == ReviewStatus.verified)
-    rows = db.execute(statement.limit(25000)).all()
-    return [
-        MapPoint(
-            id=organization.id,
-            name=organization.name,
-            organization_type=organization.organization_type,
-            customer_status=organization.customer_status,
-            review_status=organization.review_status,
-            longitude=site.longitude,
-            latitude=site.latitude,
-            province=site.province,
-            city=site.city,
-            district=site.district,
-        )
-        for organization, site in rows
-    ]
 
 
 @router.get("", response_model=OrganizationPage, dependencies=[Depends(get_current_admin)])
@@ -119,9 +145,11 @@ def organizations(
     geocode_status: GeocodeStatus | None = None,
     sports_only: bool = False,
     verified_only: bool = False,
+    archived_only: bool = False,
     db: Session = Depends(get_db),
+    user: AdminUser = Depends(get_current_admin),
 ) -> OrganizationPage:
-    """返回可核查的分页单位列表，避免二万条候选记录拖慢审核页面。"""
+    """返回账号范围内可核查的分页单位列表，避免跨区域读取和全量加载。"""
 
     items, total = list_organizations(
         db,
@@ -137,6 +165,8 @@ def organizations(
         geocode_status=geocode_status,
         sports_only=sports_only,
         verified_only=verified_only,
+        archived_only=archived_only,
+        data_scope=account_data_scope(user),
     )
     return OrganizationPage(items=[to_read(item) for item in items], total=total, page=page, page_size=page_size)
 
@@ -153,8 +183,11 @@ def public_organizations(
     city: str | None = None,
     district: str | None = None,
     db: Session = Depends(get_db),
+    user: AdminUser = Depends(get_current_user),
 ) -> PublicOrganizationPage:
-    """匿名返回主站正在展示的单位字段，排除详细地址、备注和证据内容。"""
+    """返回账号范围内主站单位字段，排除详细地址、备注和证据内容。"""
+
+    data_scope = account_data_scope(user)
 
     rows, total = list_public_organizations(
         db,
@@ -167,6 +200,7 @@ def public_organizations(
         province=province,
         city=city,
         district=district,
+        data_scope=data_scope,
     )
     public_items = [
         PublicOrganizationRead(
@@ -185,7 +219,12 @@ def public_organizations(
             cooperation_intent=item.cooperation_intent,
             cooperation_level=item.cooperation_level,
             evidence_count=evidence_count,
-            sites=[PublicSiteRead.model_validate(site) for site in item.sites],
+            sites=[
+                PublicSiteRead.model_validate(site)
+                for site in item.sites
+                if location_is_visible(data_scope, site.province, site.city)
+            ],
+            competitor_contracts=public_organization_competitor_links(item),
         )
         for item, evidence_count in rows
     ]
@@ -205,14 +244,15 @@ def export_organizations(
     sports_only: bool = False,
     verified_only: bool = False,
     db: Session = Depends(get_db),
-    _user=Depends(get_current_admin),
+    user: AdminUser = Depends(get_current_admin),
 ) -> StreamingResponse:
-    """下载与当前审核列表同条件的 Excel，避免人工翻页或另行拼接候选数据。"""
+    """下载当前账号范围与筛选条件共同命中的单位，防止导出绕过页面权限。"""
 
     organizations = list_organizations_for_export(
         db, search=search, types=types, customer_statuses=customer_statuses, review_statuses=review_statuses,
         province=province, city=city, district=district, geocode_status=geocode_status, sports_only=sports_only,
         verified_only=verified_only,
+        data_scope=account_data_scope(user),
     )
     workbook = build_organization_export_workbook(organizations)
     return StreamingResponse(
@@ -224,35 +264,60 @@ def export_organizations(
 
 @router.post("", response_model=OrganizationRead, status_code=201)
 def create(payload: OrganizationAdminCreate, db: Session = Depends(get_db), user=Depends(get_current_admin)) -> OrganizationRead:
-    """管理员原子写入单位主档、主地点和可选关联记录。"""
+    """在账号负责区域内原子写入单位主档、主地点和可选关联记录。"""
 
+    require_location_access(account_data_scope(user), payload.primary_site.province, payload.primary_site.city)
     return to_read(create_organization(db, payload, user.username))
 
 
-@router.get("/{organization_id}", response_model=OrganizationRead)
-def detail(organization_id: UUID, db: Session = Depends(get_db), _user=Depends(get_current_admin)) -> OrganizationRead:
-    """提供列表抽屉与地图 pin 详情所需的单条单位档案。"""
+@router.post("/batch", response_model=OrganizationBatchResult)
+def batch_update(payload: OrganizationBatchAction, db: Session = Depends(get_db), user=Depends(get_current_admin)) -> OrganizationBatchResult:
+    """确认全部所选单位都在账号范围内，再以单一事务处理批量动作。"""
 
+    data_scope = account_data_scope(user)
+    for organization_id in payload.ids:
+        require_organization_access(db, organization_id, data_scope)
+    return OrganizationBatchResult(updated=batch_update_organizations(db, payload, user.username))
+
+
+@router.get("/{organization_id}", response_model=OrganizationRead)
+def detail(organization_id: UUID, db: Session = Depends(get_db), user=Depends(get_current_admin)) -> OrganizationRead:
+    """只提供账号范围内列表抽屉与地图 pin 所需的完整单位档案。"""
+
+    require_organization_access(db, organization_id, account_data_scope(user))
     return to_read(get_organization(db, organization_id))
 
 
 @router.patch("/{organization_id}", response_model=OrganizationRead)
 def update(organization_id: UUID, payload: OrganizationUpdate, db: Session = Depends(get_db), user=Depends(get_current_admin)) -> OrganizationRead:
-    """保存审核人员对单位主档案的人工修正，并自动记录操作日志。"""
+    """保存账号范围内单位，并拒绝把主地点移动到账号覆盖范围之外。"""
 
+    data_scope = account_data_scope(user)
+    require_organization_access(db, organization_id, data_scope)
+    if payload.primary_site is not None and not data_scope.unrestricted:
+        organization = get_organization(db, organization_id)
+        primary_site = next((site for site in organization.sites if site.is_primary), None)
+        site_changes = payload.primary_site.model_dump(exclude_unset=True)
+        require_location_access(
+            data_scope,
+            site_changes.get("province", primary_site.province if primary_site else None),
+            site_changes.get("city", primary_site.city if primary_site else None),
+        )
     return to_read(update_organization(db, organization_id, payload, user.username))
 
 
 @router.delete("/{organization_id}", status_code=204)
 def delete(organization_id: UUID, db: Session = Depends(get_db), user=Depends(get_current_admin)) -> Response:
-    """仅在管理员二次确认后永久删除单位，数据库级联清理关联子记录。"""
+    """仅在区域权限和二次确认均通过后永久删除单位。"""
 
+    require_organization_access(db, organization_id, account_data_scope(user))
     delete_organization(db, organization_id, user.username)
     return Response(status_code=204)
 
 
 @router.post("/{organization_id}/review", response_model=OrganizationRead)
 def review(organization_id: UUID, payload: ReviewAction, db: Session = Depends(get_db), user=Depends(get_current_admin)) -> OrganizationRead:
-    """标记已核验或不纳入，保留原始记录和排除理由供后续复核。"""
+    """在账号范围内标记已核验或不纳入，并保留排除理由。"""
 
+    require_organization_access(db, organization_id, account_data_scope(user))
     return to_read(review_organization(db, organization_id, payload, user.username))

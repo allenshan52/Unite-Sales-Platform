@@ -37,6 +37,8 @@ export async function GET(request: NextRequest, { params }: RouteContext) {
     upstream = await fetch(targetUrl, {
       headers: { accept: request.headers.get("accept") ?? "application/json" },
       cache: "no-store",
+      // 开发环境回退代理也必须终止失联上游，避免占满 Next.js 请求槽位。
+      signal: AbortSignal.timeout(10_000),
     });
   } catch {
     return NextResponse.json(

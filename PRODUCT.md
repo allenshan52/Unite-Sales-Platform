@@ -8,11 +8,11 @@ web
 
 ## Stack
 
-Next.js（TypeScript、App Router、Tailwind CSS）；首版前端先用模拟数据，后续接入 FastAPI 与 PostgreSQL。
+Next.js（TypeScript、App Router、Tailwind CSS）、FastAPI、PostgreSQL/PostGIS、Redis、Nginx 与 Docker Compose。
 
 ## Users
 
-公司内部管理员在日常销售复盘、区域比较和商机跟进时使用本平台；首版不提供多角色协作。
+公司内部超级管理员、全国销售账号和区域销售账号在日常销售复盘、区域比较、商机跟进及主数据维护时使用本平台。
 
 ## Product Purpose
 
@@ -28,10 +28,10 @@ Next.js（TypeScript、App Router、Tailwind CSS）；首版前端先用模拟�
 
 ## Capabilities and Constraints
 
-- 首版是可交互的前端原型，所有数据为明确标记的模拟数据。
-- 地图首版按省级汇总，但项目保留城市与经纬度扩展空间。
+- 当前为受账号覆盖范围保护的全栈应用；仓库中的演示业务数据均明确标记为虚构数据。
+- 地图支持全国点位、省级热力、市级下钻、客户关系和销售覆盖，项目保留省市与经纬度。
 - 实际销售和预计销售为独立指标；金额模式默认显示实际销售，并可切换预计图层。
-- 计划中的后端为 FastAPI，数据库为 PostgreSQL。
+- 数据后台按市、省、大区、全国覆盖范围限制读取和写入；超级管理员额外维护授权账号。
 
 ## Brand Commitments
 
@@ -39,7 +39,7 @@ Next.js（TypeScript、App Router、Tailwind CSS）；首版前端先用模拟�
 
 ## Evidence on Hand
 
-用户提供了三个界面参考图与 Parley 网站链接。当前没有真实销售数据、品牌资产或生产客户资料；原型中的客户、项目与数字必须是虚构演示信息。
+用户提供了界面参考与优纳特品牌标识。仓库不保存真实客户联系人、生产数据库导出、密码或地图密钥；内置客户、项目和数字均为虚构演示信息。
 
 ## Product Principles
 

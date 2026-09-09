@@ -5,13 +5,8 @@
 import { useEffect, useRef, useState } from "react";
 
 import type { MapPoint } from "@/lib/api";
-
-declare global {
-  interface Window {
-    AMapLoader?: AMapLoaderRuntime;
-    _AMapSecurityConfig?: { serviceHost: string };
-  }
-}
+import { destroyAmapMap, loadAmapNamespace } from "@/lib/amap";
+import { escapeHtml } from "@/lib/html";
 
 interface AMapLngLat {
   getLng(): number;
@@ -25,10 +20,18 @@ interface AMapMarker {
   on(event: "click", handler: () => void): void;
 }
 
+interface AMapInfoWindow {
+  setContent(content: HTMLElement): void;
+  open(map: AMapMap, position: [number, number]): void;
+  close(): void;
+}
+
 interface AMapMap {
   addControl(control: unknown): void;
   destroy(): void;
+  getFitZoomAndCenterByBounds(bounds: object, avoid: number[], maxZoom: number): [number, AMapLngLat];
   setCenter(center: [number, number]): void;
+  setZoomAndCenter(zoom: number, center: [number, number] | AMapLngLat): void;
 }
 
 interface ClusterDatum {
@@ -42,7 +45,10 @@ interface AMapMarkerCluster {
 
 interface AMapNamespace {
   getConfig(): { appname?: string };
+  Bounds: new (southWest: [number, number], northEast: [number, number]) => object;
+  Pixel: new (x: number, y: number) => object;
   Map: new (container: HTMLElement, options: Record<string, unknown>) => AMapMap;
+  InfoWindow: new (options: Record<string, unknown>) => AMapInfoWindow;
   Scale: new () => unknown;
   ToolBar: new (options: Record<string, unknown>) => unknown;
   MarkerCluster: new (
@@ -59,78 +65,18 @@ interface AMapNamespace {
   ) => AMapMarkerCluster;
 }
 
-interface AMapLoaderRuntime {
-  load(options: Record<string, unknown>): Promise<AMapNamespace>;
-}
-
-type AMapRuntime = { map: AMapMap; AMap: AMapNamespace; cluster: AMapMarkerCluster | null };
-let amapLoaderPromise: Promise<NonNullable<Window["AMapLoader"]>> | null = null;
+type AMapRuntime = { map: AMapMap; AMap: AMapNamespace; cluster: AMapMarkerCluster | null; infoWindow: AMapInfoWindow | null };
 
 interface OrganizationMapProps {
   points: MapPoint[];
   selectedId: string | null;
   onSelectPoint: (point: MapPoint) => void;
+  focusRegion?: boolean;
+  showPointPopup?: boolean;
 }
 
-/** 加载一次高德 Loader 脚本，保留现有项目的安全代理路径而不把安全密钥写入浏览器。 */
-function loadAmapLoader(): Promise<NonNullable<Window["AMapLoader"]>> {
-  if (window.AMapLoader) return Promise.resolve(window.AMapLoader);
-  if (amapLoaderPromise) return amapLoaderPromise;
-  const promise = new Promise<AMapLoaderRuntime>((resolve, reject) => {
-    const resolveAvailableLoader = () => {
-      if (window.AMapLoader) resolve(window.AMapLoader);
-      else reject(new Error("高德地图加载器不可用"));
-    };
-    const existing = document.querySelector<HTMLScriptElement>('script[data-amap-loader="true"]');
-    if (existing) {
-      // React 严格模式会二次挂载组件；脚本已完成时不能再等待一个不会重放的 load 事件。
-      if (existing.dataset.loaded === "true") {
-        resolveAvailableLoader();
-        return;
-      }
-      existing.addEventListener("load", resolveAvailableLoader, { once: true });
-      existing.addEventListener("error", () => reject(new Error("高德地图加载器加载失败")), { once: true });
-      return;
-    }
-    const script = document.createElement("script");
-    script.src = "https://webapi.amap.com/loader.js";
-    script.async = true;
-    script.dataset.amapLoader = "true";
-    // 记录终态，使后续 effect 可同步复用已完成的加载器。
-    script.addEventListener("load", () => { script.dataset.loaded = "true"; }, { once: true });
-    script.onload = resolveAvailableLoader;
-    script.onerror = () => reject(new Error("高德地图加载器加载失败"));
-    document.head.appendChild(script);
-  }).catch((error: unknown) => {
-    // 失败 Promise 不能永久缓存，否则网络恢复后所有后续挂载都会立即失败。
-    amapLoaderPromise = null;
-    throw error;
-  });
-  amapLoaderPromise = promise;
-  return promise;
-}
-
-/** 为一次 SDK 加载设置终止时间，避免两个悬挂 Promise 让地图永久处于空白。 */
-function loadRuntimeAttempt(loader: AMapLoaderRuntime, options: Record<string, unknown>): Promise<AMapNamespace> {
-  return new Promise((resolve, reject) => {
-    const timeoutId = window.setTimeout(() => reject(new Error("高德地图加载超时")), 8000);
-    loader.load(options).then(resolve, reject).finally(() => window.clearTimeout(timeoutId));
-  });
-}
-
-/** 加载 AMap 运行时；超时或失败时只重试一次，并最终返回明确错误。 */
-async function loadAmapRuntime(loader: AMapLoaderRuntime, key: string): Promise<AMapNamespace> {
-  const options = { key, version: "2.0", plugins: ["AMap.MarkerCluster", "AMap.ToolBar", "AMap.Scale"] };
-  let lastError: unknown;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      return await loadRuntimeAttempt(loader, options);
-    } catch (error: unknown) {
-      lastError = error;
-    }
-  }
-  throw lastError instanceof Error ? lastError : new Error("高德地图加载失败");
-}
+const REGION_FIT_AVOIDANCE: [number, number, number, number] = [72, 112, 96, 96];
+const REGION_FIT_MAX_ZOOM = 12;
 
 /** 为不同客户状态生成可辨认 pin，帮助在密集点位中优先识别成交和商机客户。 */
 function pinColor(status: MapPoint["customer_status"]): string {
@@ -142,13 +88,65 @@ function pointKey(longitude: number, latitude: number): string {
   return `${longitude.toFixed(6)}:${latitude.toFixed(6)}`;
 }
 
-/** 对写入 Marker HTML 属性的单位名做最小转义，避免异常名称破坏 pin 标记。 */
-function escapeHtmlAttribute(value: string): string {
-  return value.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+/** 把地图点位的安全字段组装为可关闭的信息卡，所有数据库文本先完成 HTML 转义。 */
+function pointPopupContent(point: MapPoint, onClose: () => void): HTMLElement {
+  const content = document.createElement("article");
+  const location = [point.province, point.city, point.district].filter(Boolean).join(" · ") || "行政区待补充";
+  const opportunity = point.active_opportunity_count > 0
+    ? `${point.active_opportunity_count} 个推进中 · ${point.opportunity_stage ?? "阶段待补充"}`
+    : "暂无推进中商机";
+  const amount = Number(point.estimated_opportunity_amount);
+  const amountLabel = point.active_opportunity_count > 0 && Number.isFinite(amount)
+    ? `¥${new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 0 }).format(amount)}`
+    : "—";
+  content.className = "organization-map-popup";
+  content.setAttribute("role", "dialog");
+  content.setAttribute("aria-label", `${point.name}单位信息`);
+  content.innerHTML = `
+    <button class="organization-map-popup-close" type="button" aria-label="关闭单位信息">×</button>
+    <header><span>单位信息</span><strong>${escapeHtml(point.name)}</strong></header>
+    <div class="organization-map-popup-tags"><span>${escapeHtml(point.organization_type)}</span><span>${escapeHtml(point.customer_status)}</span></div>
+    <dl>
+      <div><dt>地理位置</dt><dd>${escapeHtml(location)}<small>${escapeHtml(point.address ?? "详细地址待补充")}</small><small>${point.longitude.toFixed(6)}, ${point.latitude.toFixed(6)}</small></dd></div>
+      <div><dt>商机概况</dt><dd>${escapeHtml(opportunity)}</dd></div>
+      <div><dt>预计金额</dt><dd class="organization-map-popup-amount">${amountLabel}</dd></div>
+    </dl>
+    <i class="organization-map-popup-arrow" aria-hidden="true"></i>`;
+  content.querySelector<HTMLButtonElement>(".organization-map-popup-close")?.addEventListener("click", onClose, { once: true });
+  return content;
+}
+
+/** 在点位上方打开唯一 InfoWindow，并让高德自动避让底部图例。 */
+function openPointPopup(runtime: AMapRuntime, point: MapPoint): void {
+  if (!runtime.infoWindow) return;
+  runtime.infoWindow.setContent(pointPopupContent(point, () => runtime.infoWindow?.close()));
+  runtime.infoWindow.open(runtime.map, [point.longitude, point.latitude]);
+}
+
+/** 按当前地区点位计算视野，并限制最大层级，避免边缘 Pin 贴住竖边界或单点过度放大。 */
+function fitRegionPoints(runtime: AMapRuntime, points: MapPoint[]): void {
+  if (points.length === 0) return;
+  let minLongitude = points[0].longitude;
+  let maxLongitude = minLongitude;
+  let minLatitude = points[0].latitude;
+  let maxLatitude = minLatitude;
+  for (const point of points.slice(1)) {
+    minLongitude = Math.min(minLongitude, point.longitude);
+    maxLongitude = Math.max(maxLongitude, point.longitude);
+    minLatitude = Math.min(minLatitude, point.latitude);
+    maxLatitude = Math.max(maxLatitude, point.latitude);
+  }
+  if (minLongitude === maxLongitude && minLatitude === maxLatitude) {
+    runtime.map.setZoomAndCenter(REGION_FIT_MAX_ZOOM, [minLongitude, minLatitude]);
+    return;
+  }
+  const bounds = new runtime.AMap.Bounds([minLongitude, minLatitude], [maxLongitude, maxLatitude]);
+  const [zoom, center] = runtime.map.getFitZoomAndCenterByBounds(bounds, REGION_FIT_AVOIDANCE, REGION_FIT_MAX_ZOOM);
+  runtime.map.setZoomAndCenter(zoom, center);
 }
 
 /** 管理端全国目标单位地图，聚合 20,000 条以内的可信坐标并与详情抽屉联动。 */
-export function AdminOrganizationMap({ points, selectedId, onSelectPoint }: OrganizationMapProps) {
+export function AdminOrganizationMap({ points, selectedId, onSelectPoint, focusRegion = false, showPointPopup = false }: OrganizationMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const runtimeRef = useRef<AMapRuntime | null>(null);
   const selectRef = useRef(onSelectPoint);
@@ -160,24 +158,23 @@ export function AdminOrganizationMap({ points, selectedId, onSelectPoint }: Orga
 
   useEffect(() => {
     let disposed = false;
-    const key = process.env.NEXT_PUBLIC_AMAP_JSAPI_KEY;
-    if (!key || !containerRef.current) {
-      setError("未配置高德 Web JS API Key，地图暂不可用。");
-      return;
-    }
-    // 高德安全模式要求完整的同源代理地址；`/_AMapService` 必须是路径首段。
-    window._AMapSecurityConfig = { serviceHost: `${window.location.origin}/_AMapService` };
-    loadAmapLoader()
-      .then((loader) => loadAmapRuntime(loader, key))
+    if (!containerRef.current) return;
+    loadAmapNamespace<AMapNamespace>(["AMap.MarkerCluster", "AMap.ToolBar", "AMap.Scale"])
       .then((AMap) => {
-        // 高德技能调用标识必须在创建 Map 实例前设置。
-        AMap.getConfig().appname = "amap-jsapi-skill";
         // Strict Mode 的演练性 cleanup 不会卸载当前 DOM 容器，不能据此丢弃仍可用的 SDK 结果。
         if (disposed || !containerRef.current) return;
         const map = new AMap.Map(containerRef.current, { viewMode: "2D", zoom: 4.4, center: [104.1, 35.6], mapStyle: "amap://styles/light" });
         map.addControl(new AMap.Scale());
         map.addControl(new AMap.ToolBar({ position: "RT" }));
-        runtimeRef.current = { map, AMap, cluster: null };
+        const infoWindow = showPointPopup ? new AMap.InfoWindow({
+          isCustom: true,
+          autoMove: true,
+          avoid: [24, 24, 90, 24],
+          closeWhenClickMap: true,
+          anchor: "bottom-center",
+          offset: new AMap.Pixel(0, -16),
+        }) : null;
+        runtimeRef.current = { map, AMap, cluster: null, infoWindow };
         setMapReady(true);
       })
       .catch((loadError: unknown) => {
@@ -185,10 +182,11 @@ export function AdminOrganizationMap({ points, selectedId, onSelectPoint }: Orga
       });
     return () => {
       disposed = true;
-      runtimeRef.current?.map.destroy();
+      runtimeRef.current?.infoWindow?.close();
+      destroyAmapMap(runtimeRef.current?.map ?? null);
       runtimeRef.current = null;
     };
-  }, []);
+  }, [showPointPopup]);
 
   useEffect(() => {
     const runtime = runtimeRef.current;
@@ -197,7 +195,9 @@ export function AdminOrganizationMap({ points, selectedId, onSelectPoint }: Orga
     const pointsByCoordinate = new Map<string, MapPoint[]>();
     points.forEach((point) => {
       const key = pointKey(point.longitude, point.latitude);
-      pointsByCoordinate.set(key, [...(pointsByCoordinate.get(key) ?? []), point]);
+      const bucket = pointsByCoordinate.get(key);
+      if (bucket) bucket.push(point);
+      else pointsByCoordinate.set(key, [point]);
     });
     pointsByCoordinateRef.current = pointsByCoordinate;
     if (!runtime.cluster) {
@@ -210,11 +210,14 @@ export function AdminOrganizationMap({ points, selectedId, onSelectPoint }: Orga
           // 优先使用本轮数据；坐标索引 ref 作为不同 SDK 版本的兼容降级，始终指向最新筛选结果。
           const position = marker.getPosition();
           const point = markerData?.extData ?? (position ? pointsByCoordinateRef.current.get(pointKey(position.getLng(), position.getLat()))?.[0] : undefined);
-          const title = escapeHtmlAttribute(point?.name ?? "目标单位");
+          const title = escapeHtml(point?.name ?? "目标单位");
           const color = point ? pinColor(point.customer_status) : "#536d5c";
           marker.setContent(`<span class="org-map-pin" style="--pin:${color}" title="${title}"></span>`);
           marker.setAnchor("center");
-          if (point) marker.on("click", () => selectRef.current(point));
+          if (point) marker.on("click", () => {
+            if (showPointPopup) openPointPopup(runtime, point);
+            selectRef.current(point);
+          });
         },
         renderClusterMarker: ({ count, marker }) => {
           marker.setContent(`<span class="org-map-cluster">${count}</span>`);
@@ -224,12 +227,20 @@ export function AdminOrganizationMap({ points, selectedId, onSelectPoint }: Orga
     } else {
       runtime.cluster.setData(data);
     }
-  }, [mapReady, points]);
+    if (focusRegion) fitRegionPoints(runtime, points);
+  }, [focusRegion, mapReady, points, showPointPopup]);
 
   useEffect(() => {
     const selected = points.find((point) => point.id === selectedId);
-    if (selected && runtimeRef.current) runtimeRef.current.map.setCenter([selected.longitude, selected.latitude]);
-  }, [mapReady, points, selectedId]);
+    const runtime = runtimeRef.current;
+    if (!runtime) return;
+    if (!selected) {
+      runtime.infoWindow?.close();
+      return;
+    }
+    runtime.map.setCenter([selected.longitude, selected.latitude]);
+    if (showPointPopup) openPointPopup(runtime, selected);
+  }, [mapReady, points, selectedId, showPointPopup]);
 
   return (
     <div className="organization-map-shell">

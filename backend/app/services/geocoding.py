@@ -6,7 +6,7 @@ import json
 from math import cos, pi, sin, sqrt
 import re
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from urllib.request import urlopen
 
 from geoalchemy2.elements import WKTElement
@@ -91,22 +91,80 @@ def gcj02_to_wgs84(longitude: float, latitude: float) -> tuple[float, float]:
     return longitude - delta_lng, latitude - delta_lat
 
 
-def _request_amap_json(endpoint: str, query: dict[str, str]) -> dict[str, object]:
+def _request_amap_json(endpoint: str, query: dict[str, str], *, timeout: int = 5) -> dict[str, object]:
     """调用高德 Web 服务并隐藏请求细节，防止日志意外泄露服务端 Key。"""
 
-    api_key = get_settings().amap_rest_api_key
+    settings = get_settings()
+    api_key = settings.amap_rest_api_key
     if not api_key:
         raise AmapGeocodeError("未配置高德 Web 服务 Key，无法执行地址编码。")
     request_query = {**query, "key": api_key, "output": "JSON"}
+    request_url = f"{settings.amap_service_base_url.rstrip('/')}{urlsplit(endpoint).path}?{urlencode(request_query)}"
     try:
         # 单次请求最多等待五秒，避免少数异常 POI 阻塞低并发队列；超时记录留在待编码而非猜测坐标。
-        with urlopen(f"{endpoint}?{urlencode(request_query)}", timeout=5) as response:  # noqa: S310
+        with urlopen(request_url, timeout=timeout) as response:  # noqa: S310
             payload = json.load(response)
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as error:
         raise AmapGeocodeError("高德地址编码服务暂不可用；本次记录保持待编码。") from error
     if payload.get("status") != "1":
         raise AmapGeocodeError("高德地址编码服务返回异常；本次记录保持待编码。")
     return payload
+
+
+def _amap_text(value: object) -> str:
+    """把高德可能返回的字符串或空数组统一为干净文本。"""
+
+    if isinstance(value, list):
+        return "".join(str(item).strip() for item in value if item)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _amap_full_address(province: str, city: str, district: str, address: str) -> str:
+    """拼接 POI 行政区与门址，并去除直辖市等相邻重复片段。"""
+
+    parts = [province, city, district, address]
+    return "".join(part for index, part in enumerate(parts) if part and (index == 0 or part != parts[index - 1]))
+
+
+def search_amap_places(keyword: str, limit: int = 8) -> list[dict[str, str]]:
+    """使用服务端 Web 服务 Key 搜索公司地点，避免把 REST Key 暴露给浏览器。"""
+
+    payload = _request_amap_json(AMAP_POI_SEARCH_ENDPOINT, {
+        "keywords": keyword.strip(),
+        "extensions": "all",
+        "offset": str(limit),
+        "page": "1",
+    }, timeout=15)
+    results: list[dict[str, str]] = []
+    for raw_poi in payload.get("pois") or []:
+        if not isinstance(raw_poi, dict):
+            continue
+        location = _amap_text(raw_poi.get("location"))
+        try:
+            longitude_text, latitude_text = location.split(",", maxsplit=1)
+            longitude, latitude = float(longitude_text), float(latitude_text)
+        except (TypeError, ValueError):
+            continue
+        if not (72.004 <= longitude <= 137.8347 and 0.8293 <= latitude <= 55.8271):
+            continue
+        province = _amap_text(raw_poi.get("pname"))
+        city = _amap_text(raw_poi.get("cityname")) or province
+        district = _amap_text(raw_poi.get("adname"))
+        address = _amap_full_address(province, city, district, _amap_text(raw_poi.get("address")))
+        name = _amap_text(raw_poi.get("name")) or address
+        if not name:
+            continue
+        results.append({
+            "name": name,
+            "address": address,
+            "province": province,
+            "city": city,
+            "district": district,
+            "amap_adcode": _amap_text(raw_poi.get("adcode")),
+            "longitude": f"{longitude:.6f}",
+            "latitude": f"{latitude:.6f}",
+        })
+    return results
 
 
 def geocode_address(address: str, city: str | None) -> GeocodeMatch | None:

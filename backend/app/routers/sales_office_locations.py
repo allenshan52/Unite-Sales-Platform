@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import SalesOfficeLocation
 from app.schemas import SalesOfficeLocationRead, SalesOfficeLocationUpdate
-from app.services.auth import get_current_admin
+from app.services.auth import get_current_super_admin
 from app.services.sales_office_locations import list_public_sales_office_locations, list_sales_office_locations, update_sales_office_location
 
 router = APIRouter(prefix="/sales-office-locations", tags=["销售常驻点管理"])
@@ -22,7 +22,7 @@ def public_locations(db: Session = Depends(get_db)) -> list[SalesOfficeLocation]
     return list_public_sales_office_locations(db)
 
 
-@router.get("", response_model=list[SalesOfficeLocationRead], dependencies=[Depends(get_current_admin)])
+@router.get("", response_model=list[SalesOfficeLocationRead], dependencies=[Depends(get_current_super_admin)])
 def admin_locations(db: Session = Depends(get_db)) -> list[SalesOfficeLocation]:
     """管理员读取全部常驻点，便于后续维护停用点及其覆盖半径。"""
 
@@ -34,7 +34,7 @@ def update_location(
     location_id: UUID,
     payload: SalesOfficeLocationUpdate,
     db: Session = Depends(get_db),
-    user=Depends(get_current_admin),
+    user=Depends(get_current_super_admin),
 ) -> SalesOfficeLocation:
     """把已校验的常驻点字段交给服务层更新并记录管理员操作。"""
 

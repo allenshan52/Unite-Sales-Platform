@@ -1,8 +1,8 @@
 "use client";
 
 /**
- * 销售地图仪表盘主页面：组合 React、GSAP、AMap 点位地图与省级单位热力组件。
- * 首页右侧标签切换两种单位地图；演示洞察数据与真实单位数据保持明确分离。
+ * 销售地图仪表盘主页面：组合 React、GSAP、AMap 点位地图与省级成交热力组件。
+ * 首页主导航只保留全国单位地图与数据洞察；同行市场版图实现保留但暂不开放入口。
  */
 import {
   useEffect,
@@ -12,17 +12,28 @@ import {
   type ReactNode,
 } from "react";
 import Image from "next/image";
+import dynamic from "next/dynamic";
 import { gsap } from "gsap";
 import { useGSAP } from "@gsap/react";
+import { AccessLoginPanel } from "@/components/access-login-panel";
 import { AdminOrganizationMap } from "@/components/admin-organization-map";
-import { HomeOrganizationDatabase } from "@/components/home-organization-database";
-import { HomeOrganizationHeatmap } from "@/components/home-organization-heatmap";
-import { apiFetch, queryString, type ChannelPartnerMapPoint, type FilterOptions, type MapPoint, type ProvinceOrganizationSummary, type SalesOfficeLocation } from "@/lib/api";
+import { apiFetch, queryString, type ChannelPartnerMapPoint, type CurrentUser, type FilterOptions, type MapPoint, type SalesOfficeLocation } from "@/lib/api";
 
 gsap.registerPlugin(useGSAP);
 
-type Screen = "map" | "data" | "test";
-type UnitMapView = "points" | "heat";
+const HomeCompetitorMarketMap = dynamic(() => import("@/components/home-competitor-market-map").then((module) => module.HomeCompetitorMarketMap), { loading: LazyPanelLoading });
+const HomeDataInsights = dynamic(() => import("@/components/home-data-insights").then((module) => module.HomeDataInsights), { loading: LazyPanelLoading });
+const HomeGroupNetworkMap = dynamic(() => import("@/components/home-group-network-map").then((module) => module.HomeGroupNetworkMap), { loading: LazyPanelLoading });
+const HomeOrganizationHeatmap = dynamic(() => import("@/components/home-organization-heatmap").then((module) => module.HomeOrganizationHeatmap), { loading: LazyPanelLoading });
+const HomeSalespersonCoverageMap = dynamic(() => import("@/components/home-salesperson-coverage-map").then((module) => module.HomeSalespersonCoverageMap), { loading: LazyPanelLoading });
+const HomeTypicalCaseMap = dynamic(() => import("@/components/home-typical-case-map").then((module) => module.HomeTypicalCaseMap), { loading: LazyPanelLoading });
+
+type Screen = "map" | "data";
+type UnitMapView = "points" | "heat" | "groups" | "competitors" | "salespeople" | "cases";
+
+/** 临时隐藏同行市场版图入口；改为 true 即可恢复原按钮和完整视图。 */
+const showCompetitorMarketMapEntry = false;
+
 type UnitMapFilters = {
   province: string;
   city: string;
@@ -30,37 +41,6 @@ type UnitMapFilters = {
   organizationType: string;
   customerStatus: string;
 };
-const highlights = [
-  {
-    label: "实际销售",
-    value: "3,570",
-    unit: "万元",
-    trend: "+18.6%",
-    color: "orange",
-  },
-  {
-    label: "预计销售",
-    value: "2,871",
-    unit: "万元",
-    trend: "+24.2%",
-    color: "purple",
-  },
-  {
-    label: "活跃项目",
-    value: "34",
-    unit: "个",
-    trend: "8 个待推进",
-    color: "blue",
-  },
-  {
-    label: "签约转化",
-    value: "42.7",
-    unit: "%",
-    trend: "+4.9pt",
-    color: "ink",
-  },
-];
-
 const emptyUnitMapFilters: UnitMapFilters = {
   province: "",
   city: "",
@@ -68,6 +48,11 @@ const emptyUnitMapFilters: UnitMapFilters = {
   organizationType: "",
   customerStatus: "",
 };
+
+/** 为非首屏业务面板预留固定状态，避免切换标签时出现无反馈空白。 */
+function LazyPanelLoading() {
+  return <div className="organization-map-message" role="status">正在加载业务地图…</div>;
+}
 
 /** 从后端点位字段生成稳定的降级选项，避免高德加载失败时筛选菜单为空。 */
 function uniqueMapValues(values: Array<string | null>): string[] {
@@ -78,12 +63,6 @@ function uniqueMapValues(values: Array<string | null>): string[] {
 function Icon({ name, size = 16 }: { name: string; size?: number }) {
   const paths: Record<string, ReactNode> = {
     arrow: <path d="M4 12h15m-6-6 6 6-6 6" />,
-    bell: (
-      <>
-        <path d="M7 17h10l-1.2-2.3V10a3.8 3.8 0 0 0-7.6 0v4.7z" />
-        <path d="M10 20h4" />
-      </>
-    ),
     down: <path d="m7 10 5 5 5-5" />,
     pin: (
       <>
@@ -103,6 +82,12 @@ function Icon({ name, size = 16 }: { name: string; size?: number }) {
         <circle cx="18" cy="6" r="2" />
         <circle cx="12" cy="18" r="2" />
         <path d="m7.6 7.2 3.1 8.1m5.7-8.1-3.1 8.1M8 6h8" />
+      </>
+    ),
+    people: (
+      <>
+        <circle cx="9" cy="8" r="3" />
+        <path d="M3.5 19c.4-4 2.1-6 5.5-6s5.1 2 5.5 6M16 5.5a2.5 2.5 0 0 1 0 5M16 13c2.7.2 4.1 2.1 4.5 5" />
       </>
     ),
     map: (
@@ -148,59 +133,50 @@ function Icon({ name, size = 16 }: { name: string; size?: number }) {
   );
 }
 
-/** 渲染数据洞察页的静态演示柱状图，展示实际与预计销售额对比。 */
-function MiniBarChart() {
-  const actual = [1268, 462, 426, 358, 290, 216],
-    forecast = [732, 198, 498, 120, 340, 186],
-    labels = ["浙江", "江苏", "广东", "上海", "北京", "山东"];
-  return (
-    <div
-      className="mini-chart"
-      aria-label="六大核心市场的实际与预计销售额柱状图"
-    >
-      <div className="chart-grid" />
-      {labels.map((label, index) => (
-        <div className="bar-group" key={label}>
-          <div className="bars">
-            <span
-              className="bar actual"
-              style={{ height: `${(actual[index] / 1300) * 100}%` }}
-            />
-            <span
-              className="bar forecast"
-              style={{ height: `${(forecast[index] / 1300) * 100}%` }}
-            />
-          </div>
-          <small>{label}</small>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 /**
- * 应用根页面组件：管理页面、两种单位地图和数据洞察状态，并用 GSAP 编排视图切换动效。
+ * 应用根页面组件：管理地图和数据洞察状态，并用 GSAP 编排视图切换动效。
  * 点位与热力数据分别复用现有公开 API，右侧标签只负责切换呈现方式。
  */
-export default function Home() {
+export default function HomePage() {
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
+  const [checkingSession, setCheckingSession] = useState(true);
+
+  /** 在挂载任何业务视图前恢复会话，避免匿名浏览器提前请求或看到主站内容。 */
+  useEffect(() => {
+    const controller = new AbortController();
+    void apiFetch<CurrentUser>("/auth/me", { signal: controller.signal })
+      .then(setCurrentUser)
+      .catch((requestError: unknown) => {
+        if (!(requestError instanceof DOMException && requestError.name === "AbortError")) setCurrentUser(null);
+      })
+      .finally(() => { if (!controller.signal.aborted) setCheckingSession(false); });
+    return () => controller.abort();
+  }, []);
+
+  if (checkingSession) return <main className="admin-loading">正在确认访问权限…</main>;
+  if (!currentUser) return <AccessLoginPanel audience="site" onLoggedIn={setCurrentUser} />;
+  return <Home currentUser={currentUser} onLoggedOut={() => setCurrentUser(null)} />;
+}
+
+/** 已授权主站内容：只有外层会话确认成功后才挂载并请求业务数据。 */
+function Home({ currentUser, onLoggedOut }: { currentUser: CurrentUser; onLoggedOut: () => void }) {
   const [screen, setScreen] = useState<Screen>("map"),
-    [analytics, setAnalytics] = useState("区域贡献"),
     [unitMapView, setUnitMapView] = useState<UnitMapView>("points"),
+    [heatmapVisited, setHeatmapVisited] = useState(false),
     [universityPoints, setUniversityPoints] = useState<MapPoint[]>([]),
     [mapFilterOptions, setMapFilterOptions] = useState<FilterOptions | null>(null),
     [unitMapFilters, setUnitMapFilters] = useState<UnitMapFilters>(emptyUnitMapFilters),
     [selectedOrganizationId, setSelectedOrganizationId] = useState<string | null>(null),
     [mapLoading, setMapLoading] = useState(true),
     [mapRequestError, setMapRequestError] = useState<string | null>(null),
-    [provinceSummaries, setProvinceSummaries] = useState<ProvinceOrganizationSummary[]>([]),
-    [heatLoading, setHeatLoading] = useState(true),
-    [heatRequestError, setHeatRequestError] = useState<string | null>(null),
-    [salesOfficeLocations, setSalesOfficeLocations] = useState<SalesOfficeLocation[]>([]),
+    [salesOfficeLocations, setSalesOfficeLocations] = useState<SalesOfficeLocation[] | null>(null),
     [salesOfficeLoading, setSalesOfficeLoading] = useState(true),
     [salesOfficeRequestError, setSalesOfficeRequestError] = useState<string | null>(null),
-    [channelPartnerLocations, setChannelPartnerLocations] = useState<ChannelPartnerMapPoint[]>([]),
+    [channelPartnerLocations, setChannelPartnerLocations] = useState<ChannelPartnerMapPoint[] | null>(null),
     [channelPartnerLoading, setChannelPartnerLoading] = useState(true),
-    [channelPartnerRequestError, setChannelPartnerRequestError] = useState<string | null>(null);
+    [channelPartnerRequestError, setChannelPartnerRequestError] = useState<string | null>(null),
+    [loggingOut, setLoggingOut] = useState(false),
+    [logoutError, setLogoutError] = useState<string | null>(null);
   const root = useRef<HTMLElement>(null);
   useGSAP(
     () => {
@@ -277,28 +253,7 @@ export default function Home() {
   }, [mapFilterOptionsQuery]);
 
   useEffect(() => {
-    if (unitMapView !== "heat" || provinceSummaries.length > 0) return;
-    const controller = new AbortController();
-
-    // 省级聚合由服务端一次完成，避免公开主站下载全部单位明细再统计。
-    void apiFetch<ProvinceOrganizationSummary[]>("/public/organizations/province-summaries", { signal: controller.signal })
-      .then((summaries) => {
-        setProvinceSummaries(summaries);
-      })
-      .catch((error: unknown) => {
-        if (!(error instanceof DOMException && error.name === "AbortError")) {
-          setHeatRequestError(error instanceof Error ? error.message : "省级单位热力数据加载失败");
-        }
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setHeatLoading(false);
-      });
-
-    return () => controller.abort();
-  }, [provinceSummaries.length, unitMapView]);
-
-  useEffect(() => {
-    if (unitMapView !== "heat" || salesOfficeLocations.length > 0) return;
+    if (unitMapView !== "heat" || salesOfficeLocations !== null) return;
     const controller = new AbortController();
 
     // 常驻点独立读取，热力统计成功时即使辅助网络失败也不影响主图。
@@ -316,10 +271,10 @@ export default function Home() {
       });
 
     return () => controller.abort();
-  }, [salesOfficeLocations.length, unitMapView]);
+  }, [salesOfficeLocations, unitMapView]);
 
   useEffect(() => {
-    if (unitMapView !== "heat" || channelPartnerLocations.length > 0) return;
+    if (unitMapView !== "heat" || channelPartnerLocations !== null) return;
     const controller = new AbortController();
 
     // 渠道覆盖点独立读取，任一辅助网络失败都不阻断省级热力主图。
@@ -337,7 +292,7 @@ export default function Home() {
       });
 
     return () => controller.abort();
-  }, [channelPartnerLocations.length, unitMapView]);
+  }, [channelPartnerLocations, unitMapView]);
 
   /** 在用户事件内重置点位请求状态，effect 仅同步外部地图数据。 */
   function updateUnitMapFilters(changes: Partial<UnitMapFilters>) {
@@ -347,14 +302,28 @@ export default function Home() {
     setUnitMapFilters((current) => ({ ...current, ...changes }));
   }
 
-  /** 切换地图模式时只初始化尚未成功读取的热力辅助数据。 */
+  /** 切换地图模式时只初始化尚未成功读取的辅助点位，成交热力数据由独立组件按需加载。 */
   function selectUnitMapView(view: UnitMapView) {
     if (view === "heat") {
-      if (provinceSummaries.length === 0) { setHeatLoading(true); setHeatRequestError(null); }
-      if (salesOfficeLocations.length === 0) { setSalesOfficeLoading(true); setSalesOfficeRequestError(null); }
-      if (channelPartnerLocations.length === 0) { setChannelPartnerLoading(true); setChannelPartnerRequestError(null); }
+      setHeatmapVisited(true);
+      if (salesOfficeLocations === null) { setSalesOfficeLoading(true); setSalesOfficeRequestError(null); }
+      if (channelPartnerLocations === null) { setChannelPartnerLoading(true); setChannelPartnerRequestError(null); }
     }
     setUnitMapView(view);
+  }
+
+  /** 在按钮所属视图内维护退出反馈；失败时保留当前会话和全部地图状态供用户重试。 */
+  async function handleLogout() {
+    setLoggingOut(true);
+    setLogoutError(null);
+    try {
+      await apiFetch<void>("/auth/logout", { method: "POST" });
+      onLoggedOut();
+    } catch (requestError) {
+      setLogoutError(requestError instanceof Error ? requestError.message : "退出失败，请稍后重试");
+    } finally {
+      setLoggingOut(false);
+    }
   }
 
   const provinceOptions = useMemo(
@@ -401,32 +370,17 @@ export default function Home() {
             <Icon name="chart" size={16} />
             数据洞察
           </button>
-          <button
-            id="screen-tab-test"
-            className={screen === "test" ? "active" : ""}
-            onClick={() => setScreen("test")}
-            role="tab"
-            aria-selected={screen === "test"}
-            aria-controls="screen-panel-test"
-          >
-            <Icon name="database" size={16} />
-            单位数据库
-          </button>
         </nav>
         <div className="topbar-meta">
           <a className="admin-entry-link" href="/admin/organizations">
-            管理员入口
+            数据后台
             <Icon name="arrow" size={14} />
           </a>
-          <span>2026 · Q3</span>
-          <button aria-label="通知">
-            <Icon name="bell" size={18} />
-          </button>
-          <button className="avatar" aria-label="管理员">
-            Y
-          </button>
+          <span>{currentUser.username}</span>
+          <button className="site-logout-button" type="button" onClick={() => void handleLogout()} disabled={loggingOut}>{loggingOut ? "正在退出…" : "退出"}</button>
         </div>
       </header>
+      {logoutError ? <p className="site-session-error" role="alert">{logoutError}</p> : null}
       <section
         id="screen-panel-map"
         className={`workspace-panel map-workspace ${screen === "map" ? "is-active" : ""}`}
@@ -435,14 +389,16 @@ export default function Home() {
         aria-hidden={screen !== "map"}
       >
         <div className="monitor-card map-card panel-enter">
-          <div className="map-titlebar">
-            <div className="map-caption">
-              <span>2026 / 全国单位</span>
-              <h1>全国行业单位</h1>
-              <p>{unitMapView === "points" ? "仅展示已有可靠地理编码的单位，并按地图缩放层级聚合。" : "按单位主地点汇总省级数量，橙红深浅表示单位密度档位。"}</p>
+          {unitMapView !== "groups" && unitMapView !== "competitors" && unitMapView !== "salespeople" && unitMapView !== "cases" ? (
+            <div className="map-titlebar">
+              <div className="map-caption">
+                <span>2026 / 全国单位</span>
+                <h1>全国行业单位</h1>
+                <p>{unitMapView === "points" ? "仅展示已有可靠地理编码的单位，并按地图缩放层级聚合。" : "按单位主地点汇总省级数量，橙红深浅表示单位密度档位。"}</p>
+              </div>
             </div>
-          </div>
-          <div className="map-content unit-map-content">
+          ) : null}
+          <div className={`map-content unit-map-content ${unitMapView === "groups" ? "group-network-mode" : unitMapView === "competitors" ? "competitor-market-mode" : unitMapView === "salespeople" ? "salesperson-coverage-mode" : unitMapView === "cases" ? "typical-case-mode" : ""}`}>
             {unitMapView === "points" ? (
               <>
                 <aside className="map-controls unit-map-filters" aria-label="全国行业单位筛选">
@@ -483,31 +439,35 @@ export default function Home() {
                   </label>
                 </aside>
                 <div style={{ display: "grid", minHeight: 0, position: "relative" }}>
-                  {mapLoading ? <div className="organization-map-message">正在读取可信单位坐标…</div> : null}
-                  {mapRequestError ? <div className="organization-map-message">{mapRequestError}</div> : null}
+                  {mapLoading ? <div className="organization-map-message" role="status">正在读取可信单位坐标…</div> : null}
+                  {mapRequestError ? <div className="organization-map-message" role="alert">{mapRequestError}</div> : null}
                   {!mapLoading && !mapRequestError ? (
                     <AdminOrganizationMap
                       points={universityPoints}
                       selectedId={selectedOrganizationId}
                       onSelectPoint={(point) => setSelectedOrganizationId(point.id)}
+                      focusRegion={Boolean(unitMapFilters.province || unitMapFilters.city || unitMapFilters.district)}
+                      showPointPopup
                     />
                   ) : null}
                 </div>
               </>
             ) : null}
-            <div className={`unit-map-mode ${unitMapView === "heat" ? "" : "is-hidden"}`}>
+            {heatmapVisited ? <div className={`unit-map-mode ${unitMapView === "heat" ? "" : "is-hidden"}`}>
               <HomeOrganizationHeatmap
-                summaries={provinceSummaries}
-                loading={heatLoading}
-                error={heatRequestError}
-                salesOffices={salesOfficeLocations}
+                active={unitMapView === "heat"}
+                salesOffices={salesOfficeLocations ?? []}
                 salesOfficesLoading={salesOfficeLoading}
                 salesOfficesError={salesOfficeRequestError}
-                channelPartners={channelPartnerLocations}
+                channelPartners={channelPartnerLocations ?? []}
                 channelPartnersLoading={channelPartnerLoading}
                 channelPartnersError={channelPartnerRequestError}
               />
-            </div>
+            </div> : null}
+            {unitMapView === "groups" ? <HomeGroupNetworkMap /> : null}
+            {unitMapView === "competitors" ? <HomeCompetitorMarketMap /> : null}
+            {unitMapView === "salespeople" ? <HomeSalespersonCoverageMap /> : null}
+            {unitMapView === "cases" ? <HomeTypicalCaseMap /> : null}
             <aside className="map-view-rail">
               <div className="map-switch" role="tablist" aria-label="单位地图切换">
                 <button className={unitMapView === "points" ? "selected" : ""} type="button" role="tab" aria-selected={unitMapView === "points"} onClick={() => selectUnitMapView("points")}>
@@ -516,36 +476,41 @@ export default function Home() {
                 </button>
                 <button className={unitMapView === "heat" ? "selected" : ""} type="button" role="tab" aria-selected={unitMapView === "heat"} onClick={() => selectUnitMapView("heat")}>
                   <Icon name="focus" size={18} />
-                  <span><b>全国单位热力地图</b><small>五档省级单位密度</small></span>
+                  <span><b>全国成交热力地图</b><small>成交金额与采购意向</small></span>
                 </button>
-                <button type="button" disabled>
+                <button className={unitMapView === "cases" ? "selected" : ""} type="button" role="tab" aria-selected={unitMapView === "cases"} onClick={() => selectUnitMapView("cases")}>
+                  <Icon name="database" size={18} />
+                  <span><b>典型案例地图</b><small>一省一案 · 标杆复盘</small></span>
+                </button>
+                <button className={unitMapView === "salespeople" ? "selected" : ""} type="button" role="tab" aria-selected={unitMapView === "salespeople"} onClick={() => selectUnitMapView("salespeople")}>
+                  <Icon name="people" size={18} />
+                  <span><b>销售覆盖与人效</b><small>城市范围、活动与业绩</small></span>
+                </button>
+                <button className={unitMapView === "groups" ? "selected" : ""} type="button" role="tab" aria-selected={unitMapView === "groups"} onClick={() => selectUnitMapView("groups")}>
                   <Icon name="link" size={18} />
-                  <span><b>省份详情</b><small>点击省份查看统计</small></span>
+                  <span><b>客户关系网络</b><small>总部与集团分支关系</small></span>
                 </button>
+                {showCompetitorMarketMapEntry ? (
+                  <button className={unitMapView === "competitors" ? "selected" : ""} type="button" role="tab" aria-selected={unitMapView === "competitors"} onClick={() => selectUnitMapView("competitors")}>
+                    <Icon name="focus" size={18} />
+                    <span><b>同行市场版图</b><small>据点、成交与强势区域</small></span>
+                  </button>
+                ) : null}
               </div>
             </aside>
           </div>
           <div className="map-footer">
             <span>
               <i className="legend-actual" />
-              {unitMapView === "points" ? "已定位单位" : "单位数量热力"}
+              {unitMapView === "points" ? "已定位单位" : unitMapView === "heat" ? "单位数量热力" : unitMapView === "groups" ? "集团颜色区分" : unitMapView === "competitors" ? "同行名称分色" : unitMapView === "salespeople" ? "销售姓名分色" : "橙色省份已上线"}
             </span>
             <span>
               <i className="legend-forecast" />
-              {unitMapView === "points" ? "缩放自动聚合" : "五档可多选"}
+              {unitMapView === "points" ? "缩放自动聚合" : unitMapView === "heat" ? "五档可多选" : unitMapView === "groups" ? "状态文字标识" : unitMapView === "competitors" ? "强、中、弱三级区域" : unitMapView === "salespeople" ? "1 / 3 / 6 / 12 月" : "灰色省份筹备中"}
             </span>
-            <span>{unitMapView === "points" ? "未定位记录不会显示在地图中" : "点击省份查看类型与客户状态构成"}</span>
+            <span>{unitMapView === "points" ? "未定位记录不会显示在地图中" : unitMapView === "heat" ? "点击省份查看类型与客户状态构成" : unitMapView === "groups" ? "点击总部展开关系；关闭、Esc 或返回全国集团可重置" : unitMapView === "competitors" ? "点击据点、成交单位或区域打开对应详情" : unitMapView === "salespeople" ? "点击销售 Pin 查看市、省、大区或全国覆盖，选择两人后可对比" : "点击省份或使用下拉框浏览案例复盘"}</span>
           </div>
         </div>
-      </section>
-      <section
-        id="screen-panel-test"
-        className={`workspace-panel database-workspace ${screen === "test" ? "is-active" : ""}`}
-        role="tabpanel"
-        aria-labelledby="screen-tab-test"
-        aria-hidden={screen !== "test"}
-      >
-        {screen === "test" && <HomeOrganizationDatabase />}
       </section>
       <section
         id="screen-panel-data"
@@ -554,101 +519,7 @@ export default function Home() {
         aria-labelledby="screen-tab-data"
         aria-hidden={screen !== "data"}
       >
-        <div className="data-header panel-enter">
-          <div className="data-topline">
-            <span>数据洞察</span>
-            <h1>核心销售数据</h1>
-          </div>
-          <div className="highlight-grid">
-            {highlights.map((highlight) => (
-              <article
-                className={`highlight-card ${highlight.color}`}
-                key={highlight.label}
-              >
-                <span>{highlight.label}</span>
-                <strong>
-                  {highlight.value}
-                  <small>{highlight.unit}</small>
-                </strong>
-                <div>
-                  <i />
-                  {highlight.trend}
-                  <Icon name="arrow" size={14} />
-                </div>
-              </article>
-            ))}
-          </div>
-        </div>
-        <div className="analytics-grid panel-enter">
-          <aside className="analytics-legend">
-            <span>分析维度</span>
-            {["区域贡献", "产品结构", "推进节奏", "项目清单"].map(
-              (name, index) => (
-                <button
-                  key={name}
-                  className={analytics === name ? "active" : ""}
-                  onClick={() => setAnalytics(name)}
-                >
-                  <i>{String(index + 1).padStart(2, "0")}</i>
-                  {name}
-                  <Icon name="arrow" size={14} />
-                </button>
-              ),
-            )}
-            <div className="legend-bottom">
-              <Icon name="database" size={18} />
-              <span>
-                累计
-                <br />
-                <b>6,441 万</b>
-              </span>
-            </div>
-          </aside>
-          <article className="chart-panel">
-            <div className="chart-head">
-              <div>
-                <span>{analytics}</span>
-                <h2>六大核心市场</h2>
-              </div>
-              <div className="chart-legend">
-                <span>
-                  <i className="legend-actual" />
-                  实际
-                </span>
-                <span>
-                  <i className="legend-forecast" />
-                  预计
-                </span>
-              </div>
-            </div>
-            <MiniBarChart />
-          </article>
-          <article className="pipeline-card">
-            <div>
-              <span>推进中的项目</span>
-              <button aria-label="展开项目">
-                <Icon name="arrow" size={17} />
-              </button>
-            </div>
-            <strong>
-              08 <small>条</small>
-            </strong>
-            <ul>
-              <li>
-                <span className="bubble blue" />
-                北京高校危化品安全柜 <b>75%</b>
-              </li>
-              <li>
-                <span className="bubble orange" />
-                广东生物样本存储项目 <b>62%</b>
-              </li>
-              <li>
-                <span className="bubble purple" />
-                上海标准品管理系统 <b>51%</b>
-              </li>
-            </ul>
-          </article>
-        </div>
+        {screen === "data" && <HomeDataInsights />}
       </section>
     </main>
   );

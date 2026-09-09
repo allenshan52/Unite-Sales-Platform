@@ -1,6 +1,7 @@
 """高德坐标处理单元测试：不访问网络，也不读取任何真实 Key。"""
 
-from app.services.geocoding import GeocodeMatch, _is_name_only_address, _is_verified_poi_name, _normalized_name, gcj02_to_wgs84
+from app.services import geocoding
+from app.services.geocoding import GeocodeMatch, _is_name_only_address, _is_verified_poi_name, _normalized_name, gcj02_to_wgs84, search_amap_places
 from app.services.organizations import _postgis_location
 
 
@@ -53,3 +54,22 @@ def test_name_only_address_can_use_an_exact_main_poi_but_not_an_unrelated_addres
 
     assert _is_name_only_address("成都市四川大学", "四川大学") is True
     assert _is_name_only_address("成都市武侯区一环路南一段24号", "四川大学") is False
+
+
+def test_company_location_search_normalizes_amap_poi(monkeypatch) -> None:
+    """公司地点搜索把高德 POI 规范为前端可直接回填的地址和六位坐标。"""
+
+    monkeypatch.setattr(geocoding, "_request_amap_json", lambda _endpoint, _query, **_options: {
+        "pois": [{
+            "name": "高德演示公司", "address": "演示大道18号", "pname": "上海市",
+            "cityname": [], "adname": "浦东新区", "adcode": "310115", "location": "121.506377,31.245105",
+        }],
+    })
+
+    results = search_amap_places("高德演示公司")
+
+    assert results == [{
+        "name": "高德演示公司", "address": "上海市浦东新区演示大道18号",
+        "province": "上海市", "city": "上海市", "district": "浦东新区",
+        "amap_adcode": "310115", "longitude": "121.506377", "latitude": "31.245105",
+    }]

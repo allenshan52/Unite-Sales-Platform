@@ -1,0 +1,24 @@
+# 断网维护用 Next.js 运行镜像：复用已审计基础镜像的 Linux 依赖，只覆盖宿主机已验证的构建产物。
+ARG NODE_IMAGE=unite-sales-map-web:offline-latest
+FROM ${NODE_IMAGE}
+
+USER root
+WORKDIR /app
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV HOSTNAME=0.0.0.0
+
+# 先清空基础镜像的旧 Next 产物，避免已删除页面代码以孤立 chunk 残留。
+RUN rm -rf /app/.next
+
+# 覆盖当前构建追踪到的 JS 依赖；.dockerignore 排除 Windows 原生二进制，Linux Sharp 沿用基础镜像。
+COPY --chown=node:node .next/standalone/node_modules ./node_modules
+COPY --chown=node:node .next/standalone/server.js ./server.js
+COPY --chown=node:node .next/standalone/package.json ./package.json
+COPY --chown=node:node .next/standalone/.next ./.next
+COPY --chown=node:node .next/static ./.next/static
+COPY --chown=node:node public ./public
+
+USER node
+EXPOSE 3000
+CMD ["node", "server.js"]

@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import ChannelPartnerLocation
 from app.schemas import ChannelPartnerLocationRead, ChannelPartnerLocationUpdate, PublicChannelPartnerMapPoint
-from app.services.auth import get_current_admin
+from app.services.auth import get_current_super_admin
 from app.services.channel_partner_locations import list_channel_partner_locations, list_public_channel_partner_points, update_channel_partner_location
 
 router = APIRouter(prefix="/channel-partner-locations", tags=["渠道合作方管理"])
@@ -22,7 +22,7 @@ def public_locations(db: Session = Depends(get_db)) -> list[PublicChannelPartner
     return list_public_channel_partner_points(db)
 
 
-@router.get("", response_model=list[ChannelPartnerLocationRead], dependencies=[Depends(get_current_admin)])
+@router.get("", response_model=list[ChannelPartnerLocationRead], dependencies=[Depends(get_current_super_admin)])
 def admin_locations(db: Session = Depends(get_db)) -> list[ChannelPartnerLocation]:
     """管理员读取全部渠道档案，以便后续维护授权和合同信息。"""
 
@@ -34,7 +34,7 @@ def update_location(
     location_id: UUID,
     payload: ChannelPartnerLocationUpdate,
     db: Session = Depends(get_db),
-    user=Depends(get_current_admin),
+    user=Depends(get_current_super_admin),
 ) -> ChannelPartnerLocation:
     """把已校验渠道字段交给服务层更新并记录管理员操作。"""
 

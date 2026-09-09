@@ -20,7 +20,8 @@ Set-Location -LiteralPath 'D:\桌面\优纳特销售网站'
 - Docker Compose：PostGIS 16、Redis、FastAPI、Next.js 和 Nginx 网关；数据库不发布到主机端口。
 - 首版 Alembic 迁移：`organization`、`organization_site`、`organization_evidence`、`organization_contact`、`opportunity`、`sales_project`、导入批次、重复候选和审核日志。
 - 高校/研究院必须有纳入证据；体育高校可标记体育例外；新单位默认“潜在客户 + 待核验”。
-- `/admin/organizations`：管理员登录、名称/类型/客户状态/审核状态/省份筛选、来源详情、核验操作、高德 `MarkerCluster` 地图，以及按当前筛选条件下载 Excel。
+- `/`：公司内部授权账号登录后查看全国单位地图和数据洞察；单位数据库仅保留在数据后台，未登录时不挂载业务页面且业务 API 返回 401。
+- `/admin/organizations`：管理员维护业务数据和“普通员工 / 管理员”授权账号；支持筛选、核验、高德 `MarkerCluster` 地图及 Excel 导出。
 
 ## 首次配置
 
@@ -31,14 +32,17 @@ Set-Location -LiteralPath 'D:\桌面\优纳特销售网站'
 POSTGRES_DB=unite_map
 POSTGRES_USER=unite
 POSTGRES_PASSWORD=使用密码管理器生成的随机密码
-APP_PORT=3100
+APP_PORT=33100
+CORS_ORIGINS=http://localhost:33100
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=至少16位随机密码
+APP_ENVIRONMENT=development
+ADMIN_COOKIE_SECURE=false
 AMAP_WEB_KEY=高德Web端JSAPI Key
 AMAP_SECURITY_JS_CODE=高德安全密钥
 ```
 
-`APP_PORT=3100` 用于避免占用已有本机 Next.js 开发服务器的 3000 端口。高德安全密钥仅进入 Nginx 服务端代理，浏览器代码不会读取它。
+`APP_PORT=33100` 用于避开本机 Next.js 开发端口及 Windows 保留端口段。`CORS_ORIGINS` 必须与浏览器实际入口完全一致，正式环境填写完整 HTTPS 域名。高德安全密钥仅进入 Nginx 服务端代理，浏览器代码不会读取它。本地 HTTP 保持 `APP_ENVIRONMENT=development` 与 `ADMIN_COOKIE_SECURE=false`；正式 HTTPS 环境改为 `APP_ENVIRONMENT=production` 和 `ADMIN_COOKIE_SECURE=true`，否则 API 会拒绝启动。连接池、查询超时和登录锁定的生产参数见 `.env.example`，默认值适合单 API 实例。
 
 ## 启动与检查
 
@@ -49,9 +53,11 @@ docker compose up -d
 docker compose ps
 ```
 
-首次 API 容器启动时自动执行 `alembic upgrade head`。打开 `http://localhost:3100/admin/organizations`，使用 `.env` 中配置的管理员账号登录。
+首次 API 容器启动时自动执行 `alembic upgrade head`。打开 `http://localhost:3100/`，先使用 `.env` 中配置的管理员账号登录；该账号会作为首个管理员，可在后台“授权账号”页继续添加普通员工或管理员。
 
-健康检查：`http://localhost:3100/api/v1/health`。
+健康检查分三层：兼容入口 `/api/v1/health`、无外部依赖的存活探针 `/api/v1/health/live`、同时检查 PostgreSQL 与 Redis 的生产就绪探针 `/api/v1/health/ready`。Compose 使用就绪探针控制依赖启动。
+
+升级到 `20260820_0018` 会清空旧管理员会话以建立 CSRF 哈希，管理员需重新登录一次。此后所有写请求都同时校验 HTTP-only 会话 Cookie 和 CSRF 请求头，连续失败登录会触发临时账户锁，Nginx 还会对登录入口按 IP 限速。
 
 ### 导出当前筛选的单位
 
