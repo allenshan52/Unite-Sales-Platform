@@ -10,7 +10,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from app.config import Settings
+from app.config import Settings, get_settings
 from app.database import get_db
 from app.main import app
 from app.models import AdminSession, OrganizationContact, UserRole
@@ -633,11 +633,12 @@ def test_regional_user_cannot_move_organization_outside_scope(
 def test_cors_preflight_allows_put() -> None:
     """跨源管理页面必须能预检项目实际使用的 PUT 更新接口。"""
 
+    allowed_origin = get_settings().cors_origins.split(",", 1)[0].strip()
     with TestClient(app) as client:
         response = client.options(
             "/api/v1/admin-data/competitors/demo",
             headers={
-                "Origin": "http://localhost:3100",
+                "Origin": allowed_origin,
                 "Access-Control-Request-Method": "PUT",
                 "Access-Control-Request-Headers": "Content-Type",
             },
